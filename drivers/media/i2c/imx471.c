@@ -10,6 +10,7 @@
 #include <linux/delay.h>
 #include <linux/i2c.h>
 #include <linux/module.h>
+#include <linux/of.h>
 #include <linux/pm_runtime.h>
 #include <linux/regulator/consumer.h>
 #include <media/v4l2-cci.h>
@@ -117,7 +118,7 @@
 #define to_imx471(_sd) container_of_const(_sd, struct imx471, sd)
 
 static const char * const imx471_supply_name[] = {
-	"vana",
+	"vana", "vdig", "vif",
 };
 
 struct imx471_mode {
@@ -149,6 +150,7 @@ struct imx471 {
 	struct gpio_desc *reset_gpio;
 	struct regulator_bulk_data supplies[ARRAY_SIZE(imx471_supply_name)];
 	struct clk *img_clk;
+	unsigned int num_supplies;
 
 	struct device *dev;
 	struct regmap *regmap;
@@ -290,10 +292,13 @@ static const struct imx471_mode imx471_modes[] = {
 
 static int imx471_get_regulators(struct device *dev, struct imx471 *sensor)
 {
-	for (unsigned int i = 0; i < ARRAY_SIZE(imx471_supply_name); i++)
+	/* ACPI modules expose one aggregate analog power resource. */
+	sensor->num_supplies = dev_of_node(dev) ?
+		ARRAY_SIZE(imx471_supply_name) : 1;
+	for (unsigned int i = 0; i < sensor->num_supplies; i++)
 		sensor->supplies[i].supply = imx471_supply_name[i];
 
-	return devm_regulator_bulk_get(dev, ARRAY_SIZE(imx471_supply_name),
+	return devm_regulator_bulk_get(dev, sensor->num_supplies,
 				       sensor->supplies);
 }
 
@@ -523,7 +528,7 @@ static int imx471_power_off(struct device *dev)
 	clk_disable_unprepare(sensor->img_clk);
 	gpiod_set_value_cansleep(sensor->reset_gpio, 1);
 
-	regulator_bulk_disable(ARRAY_SIZE(imx471_supply_name),
+	regulator_bulk_disable(sensor->num_supplies,
 			       sensor->supplies);
 
 	return 0;
@@ -535,7 +540,7 @@ static int imx471_power_on(struct device *dev)
 	struct imx471 *sensor = to_imx471(sd);
 	int ret;
 
-	ret = regulator_bulk_enable(ARRAY_SIZE(imx471_supply_name),
+	ret = regulator_bulk_enable(sensor->num_supplies,
 				    sensor->supplies);
 	if (ret < 0) {
 		dev_err(dev, "failed to enable regulators: %d\n", ret);
@@ -544,7 +549,7 @@ static int imx471_power_on(struct device *dev)
 
 	ret = clk_prepare_enable(sensor->img_clk);
 	if (ret < 0) {
-		regulator_bulk_disable(ARRAY_SIZE(imx471_supply_name),
+		regulator_bulk_disable(sensor->num_supplies,
 				       sensor->supplies);
 		dev_err(dev, "failed to enable imaging clock: %d\n", ret);
 		return ret;
@@ -932,6 +937,12 @@ static void imx471_remove(struct i2c_client *client)
 static DEFINE_RUNTIME_DEV_PM_OPS(imx471_pm_ops, imx471_power_off,
 				 imx471_power_on, NULL);
 
+static const struct of_device_id imx471_of_match[] = {
+	{ .compatible = "sony,imx471" },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, imx471_of_match);
+
 static const struct acpi_device_id imx471_acpi_ids[] __maybe_unused = {
 	{ "SONY471A" },
 	{ "TBE20A0" },
@@ -943,6 +954,7 @@ static struct i2c_driver imx471_i2c_driver = {
 	.driver = {
 		.name = "imx471",
 		.acpi_match_table = ACPI_PTR(imx471_acpi_ids),
+		.of_match_table = imx471_of_match,
 		.pm = pm_sleep_ptr(&imx471_pm_ops),
 	},
 	.probe = imx471_probe,

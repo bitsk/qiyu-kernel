@@ -9,15 +9,21 @@
 #include <linux/bitops.h>
 #include <linux/clk.h>
 #include <linux/delay.h>
+#include <linux/debugfs.h>
 #include <linux/device.h>
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/init.h>
+#include <linux/ktime.h>
 #include <linux/module.h>
+#include <linux/ov7251.h>
 #include <linux/pm_runtime.h>
 #include <linux/regulator/consumer.h>
+#include <linux/seq_file.h>
 #include <linux/slab.h>
+#include <linux/spinlock.h>
 #include <linux/types.h>
+#include <media/ov7251.h>
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-fwnode.h>
 #include <media/v4l2-subdev.h>
@@ -31,6 +37,10 @@
 #define OV7251_CHIP_ID_LOW		0x300b
 #define OV7251_CHIP_ID_LOW_BYTE		0x50
 #define OV7251_SC_GP_IO_IN1		0x3029
+#define OV7251_GROUP_ACCESS		0x3208
+#define OV7251_GROUP_BEGIN		0x00
+#define OV7251_GROUP_END		0x10
+#define OV7251_GROUP_LAUNCH		0xa0
 #define OV7251_AEC_EXPO_0		0x3500
 #define OV7251_AEC_EXPO_1		0x3501
 #define OV7251_AEC_EXPO_2		0x3502
@@ -121,6 +131,23 @@ enum supported_link_freqs {
 	OV7251_NUM_SUPPORTED_LINK_FREQS
 };
 
+#define OV7251_TIMING_RECORDS 16
+#define OV7251_SLOW_APPLY_NS (8 * NSEC_PER_MSEC)
+
+struct ov7251_apply_timing {
+	u64 sequence;
+	u64 entry_ns;
+	u64 locked_ns;
+	u64 batch_start_ns;
+	u64 batch_done_ns;
+	u64 launch_start_ns;
+	u64 launch_done_ns;
+	u64 return_ns;
+	u32 exposure_lines;
+	u32 gain;
+	int result;
+};
+
 struct ov7251 {
 	struct i2c_client *i2c_client;
 	struct device *dev;
@@ -147,6 +174,12 @@ struct ov7251 {
 	struct v4l2_ctrl *gain;
 	struct v4l2_ctrl *hblank;
 	struct v4l2_ctrl *vblank;
+	struct v4l2_ctrl *exposure_cluster[2];
+	bool group_error;
+	bool streaming;
+	bool frame_owned;
+	bool updating_vblank;
+	s32 pending_vblank;
 
 	/* Cached register values */
 	u8 aec_pk_manual;
@@ -158,7 +191,66 @@ struct ov7251 {
 	bool power_on;
 
 	struct gpio_desc *enable_gpio;
+	struct v4l2_ctrl *frame_sync;
+	spinlock_t timing_lock;
+	u64 timing_sequence;
+	u64 timing_count;
+	struct ov7251_apply_timing timing[OV7251_TIMING_RECORDS];
+	struct ov7251_apply_timing worst_timing;
 };
+
+static void ov7251_timing_print(struct seq_file *s, const char *kind,
+				const struct ov7251_apply_timing *t)
+{
+	seq_printf(s, "kind=%s sequence=%llu exposure_lines=%u gain=%u entry_ns=%llu locked_ns=%llu batch_start_ns=%llu batch_done_ns=%llu launch_start_ns=%llu launch_done_ns=%llu return_ns=%llu result=%d\n",
+		   kind, t->sequence, t->exposure_lines, t->gain, t->entry_ns,
+		   t->locked_ns, t->batch_start_ns, t->batch_done_ns,
+		   t->launch_start_ns, t->launch_done_ns, t->return_ns, t->result);
+}
+
+static int ov7251_timing_show(struct seq_file *s, void *unused)
+{
+	struct ov7251 *ov7251 = s->private;
+	struct ov7251_apply_timing records[OV7251_TIMING_RECORDS], worst;
+	unsigned long flags;
+	u64 count, first, n;
+
+	spin_lock_irqsave(&ov7251->timing_lock, flags);
+	count = ov7251->timing_count;
+	worst = ov7251->worst_timing;
+	memcpy(records, ov7251->timing, sizeof(records));
+	spin_unlock_irqrestore(&ov7251->timing_lock, flags);
+	seq_printf(s, "clock=MONOTONIC slow_apply_ns=%llu slow_or_error_count=%llu records=%u\n",
+		   (u64)OV7251_SLOW_APPLY_NS, count, OV7251_TIMING_RECORDS);
+	first = count > OV7251_TIMING_RECORDS ? count - OV7251_TIMING_RECORDS : 0;
+	for (n = first; n < count; n++)
+		ov7251_timing_print(s, "recent", &records[n % OV7251_TIMING_RECORDS]);
+	if (worst.sequence)
+		ov7251_timing_print(s, "worst", &worst);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(ov7251_timing);
+
+static void ov7251_timing_remove(void *directory)
+{
+	debugfs_remove_recursive(directory);
+}
+
+static void ov7251_timing_save(struct ov7251 *ov7251,
+			       struct ov7251_apply_timing *sample)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&ov7251->timing_lock, flags);
+	sample->sequence = ++ov7251->timing_sequence;
+	if (sample->result || sample->return_ns - sample->entry_ns >= OV7251_SLOW_APPLY_NS) {
+		ov7251->timing[ov7251->timing_count++ % OV7251_TIMING_RECORDS] = *sample;
+		if (sample->return_ns - sample->entry_ns >
+		    ov7251->worst_timing.return_ns - ov7251->worst_timing.entry_ns)
+			ov7251->worst_timing = *sample;
+	}
+	spin_unlock_irqrestore(&ov7251->timing_lock, flags);
+}
 
 static inline struct ov7251 *to_ov7251(struct v4l2_subdev *sd)
 {
@@ -299,6 +391,138 @@ static const struct reg_value ov7251_setting_vga_30fps[] = {
 	{ 0x380d, 0xa0 }, /* total horiz timing low */
 	{ 0x380e, 0x06 }, /* total vertical timing high */
 	{ 0x380f, 0xbc }, /* total vertical timing low */
+	{ 0x3810, 0x00 },
+	{ 0x3811, 0x04 },
+	{ 0x3812, 0x00 },
+	{ 0x3813, 0x05 },
+	{ 0x3814, 0x11 },
+	{ 0x3815, 0x11 },
+	{ 0x3820, 0x40 },
+	{ 0x3821, 0x00 },
+	{ 0x382f, 0x0e },
+	{ 0x3832, 0x00 },
+	{ 0x3833, 0x05 },
+	{ 0x3834, 0x00 },
+	{ 0x3835, 0x0c },
+	{ 0x3837, 0x00 },
+	{ 0x3b80, 0x00 },
+	{ 0x3b81, 0xa5 },
+	{ 0x3b82, 0x10 },
+	{ 0x3b83, 0x00 },
+	{ 0x3b84, 0x08 },
+	{ 0x3b85, 0x00 },
+	{ 0x3b86, 0x01 },
+	{ 0x3b87, 0x00 },
+	{ 0x3b88, 0x00 },
+	{ 0x3b89, 0x00 },
+	{ 0x3b8a, 0x00 },
+	{ 0x3b8b, 0x05 },
+	{ 0x3b8c, 0x00 },
+	{ 0x3b8d, 0x00 },
+	{ 0x3b8e, 0x00 },
+	{ 0x3b8f, 0x1a },
+	{ 0x3b94, 0x05 },
+	{ 0x3b95, 0xf2 },
+	{ 0x3b96, 0x40 },
+	{ 0x3c00, 0x89 },
+	{ 0x3c01, 0x63 },
+	{ 0x3c02, 0x01 },
+	{ 0x3c03, 0x00 },
+	{ 0x3c04, 0x00 },
+	{ 0x3c05, 0x03 },
+	{ 0x3c06, 0x00 },
+	{ 0x3c07, 0x06 },
+	{ 0x3c0c, 0x01 },
+	{ 0x3c0d, 0xd0 },
+	{ 0x3c0e, 0x02 },
+	{ 0x3c0f, 0x0a },
+	{ 0x4001, 0x42 },
+	{ 0x4004, 0x04 },
+	{ 0x4005, 0x00 },
+	{ 0x404e, 0x01 },
+	{ 0x4300, 0xff },
+	{ 0x4301, 0x00 },
+	{ 0x4315, 0x00 },
+	{ 0x4501, 0x48 },
+	{ 0x4600, 0x00 },
+	{ 0x4601, 0x4e },
+	{ 0x4801, 0x0f },
+	{ 0x4806, 0x0f },
+	{ 0x4819, 0xaa },
+	{ 0x4823, 0x3e },
+	{ 0x4837, 0x19 },
+	{ 0x4a0d, 0x00 },
+	{ 0x4a47, 0x7f },
+	{ 0x4a49, 0xf0 },
+	{ 0x4a4b, 0x30 },
+	{ 0x5000, 0x85 },
+	{ 0x5001, 0x80 },
+};
+
+/* A081 OEM mode 0 uses these 301x/3664 values before request-based
+ * group updates. Keep its initialization when selecting 690-line
+ * timing; changing VBLANK on the generic 90 fps table is not equivalent.
+ */
+static const struct reg_value ov7251_setting_vga_75fps_a081[] = {
+	{ 0x3005, 0x00 },
+	{ 0x3012, 0xc0 },
+	{ 0x3013, 0xd2 },
+	{ 0x3014, 0x04 },
+	{ 0x3016, 0xf0 },
+	{ 0x3017, 0xf0 },
+	{ 0x3018, 0xf0 },
+	{ 0x301a, 0xf0 },
+	{ 0x301b, 0xf0 },
+	{ 0x301c, 0xf0 },
+	{ 0x3023, 0x05 },
+	{ 0x3037, 0xf0 },
+	{ 0x3106, 0xda },
+	{ 0x3503, 0x07 },
+	{ 0x3509, 0x10 },
+	{ 0x3600, 0x1c },
+	{ 0x3602, 0x62 },
+	{ 0x3620, 0xb7 },
+	{ 0x3622, 0x04 },
+	{ 0x3626, 0x21 },
+	{ 0x3627, 0x30 },
+	{ 0x3630, 0x44 },
+	{ 0x3631, 0x35 },
+	{ 0x3634, 0x60 },
+	{ 0x3636, 0x00 },
+	{ 0x3662, 0x01 },
+	{ 0x3663, 0x70 },
+	{ 0x3664, 0xf0 },
+	{ 0x3666, 0x0a },
+	{ 0x3669, 0x1a },
+	{ 0x366a, 0x00 },
+	{ 0x366b, 0x50 },
+	{ 0x3673, 0x01 },
+	{ 0x3674, 0xff },
+	{ 0x3675, 0x03 },
+	{ 0x3705, 0xc1 },
+	{ 0x3709, 0x40 },
+	{ 0x373c, 0x08 },
+	{ 0x3742, 0x00 },
+	{ 0x3757, 0xb3 },
+	{ 0x3788, 0x00 },
+	{ 0x37a8, 0x01 },
+	{ 0x37a9, 0xc0 },
+	{ 0x3800, 0x00 },
+	{ 0x3801, 0x04 },
+	{ 0x3802, 0x00 },
+	{ 0x3803, 0x04 },
+	{ 0x3804, 0x02 },
+	{ 0x3805, 0x8b },
+	{ 0x3806, 0x01 },
+	{ 0x3807, 0xeb },
+	{ 0x3808, 0x02 }, /* width high */
+	{ 0x3809, 0x80 }, /* width low */
+	{ 0x380a, 0x01 }, /* height high */
+	{ 0x380b, 0xe0 }, /* height low */
+	{ 0x380c, 0x03 }, /* total horiz timing high */
+	{ 0x380d, 0xa0 }, /* total horiz timing low */
+	{ 0x380e, 0x02 }, /* total vertical timing high */
+	{ 0x380f, 0xb2 }, /* total vertical timing low */
 	{ 0x3810, 0x00 },
 	{ 0x3811, 0x04 },
 	{ 0x3812, 0x00 },
@@ -668,6 +892,20 @@ static const struct ov7251_mode_info ov7251_mode_info_data[] = {
 	{
 		.width = 640,
 		.height = 480,
+		.vts = 690,
+		.data = ov7251_setting_vga_75fps_a081,
+		.data_size = ARRAY_SIZE(ov7251_setting_vga_75fps_a081),
+		.exposure_max = 670,
+		.exposure_def = 504,
+		.timeperframe = {
+			/* 690 lines * 928 pixels / 48 MHz; measure external FSIN. */
+			.numerator = 667,
+			.denominator = 50000
+		}
+	},
+	{
+		.width = 640,
+		.height = 480,
 		.vts = 572,
 		.data = ov7251_setting_vga_90fps,
 		.data_size = ARRAY_SIZE(ov7251_setting_vga_90fps),
@@ -941,6 +1179,7 @@ static int ov7251_set_power_on(struct device *dev)
 		return ret;
 	}
 
+	ov7251->group_error = false;
 	return ret;
 }
 
@@ -950,6 +1189,7 @@ static int ov7251_set_power_off(struct device *dev)
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 	struct ov7251 *ov7251 = to_ov7251(sd);
 
+	ov7251->streaming = false;
 	clk_disable_unprepare(ov7251->xclk);
 	gpiod_set_value_cansleep(ov7251->enable_gpio, 0);
 	ov7251_regulators_disable(ov7251);
@@ -1023,11 +1263,117 @@ static int ov7251_vts_configure(struct ov7251 *ov7251, s32 vblank)
 	return ov7251_write_seq_regs(ov7251, OV7251_TIMING_VTS_REG, vts, 2);
 }
 
+/* FSIN/VSYNC is a shared pin. Keep it an input unless selected as master.
+ * These reset values are the OV7251 rev 1F A081 module synchronization setup.
+ */
+static int ov7251_configure_sync(struct ov7251 *ov7251)
+{
+	const struct reg_value slave[] = {
+		{ 0x3005, 0x00 }, { 0x3666, 0x00 },
+		{ 0x3824, 0x01 }, { 0x3825, 0x07 },
+		{ 0x3826, 0x00 }, { 0x3827, 0x00 }, { 0x3823, 0x30 },
+	};
+	const struct reg_value free_run[] = {
+		{ 0x3005, 0x00 }, { 0x3823, 0x00 }, { 0x3666, 0x0a },
+	};
+	int ret;
+
+	if (ov7251->frame_sync->val == OV7251_FRAME_SYNC_SLAVE)
+		return ov7251_set_register_array(ov7251, slave, ARRAY_SIZE(slave));
+
+	ret = ov7251_set_register_array(ov7251, free_run, ARRAY_SIZE(free_run));
+	if (ret || ov7251->frame_sync->val == OV7251_FRAME_SYNC_FREE_RUNNING)
+		return ret;
+
+	return ov7251_write_reg(ov7251, 0x3005, 0x02);
+}
+
+/* The A081 sensor library groups frame length, integration and gain. */
+static int ov7251_set_exposure_group(struct ov7251 *ov7251,
+				      s32 vblank, s32 exposure, s32 gain,
+				      struct ov7251_apply_timing *timing)
+{
+	struct i2c_client *client = ov7251->i2c_client;
+	u16 vts = ov7251->current_mode->height + vblank;
+	u8 begin[] = { OV7251_GROUP_ACCESS >> 8,
+		       OV7251_GROUP_ACCESS & 0xff, OV7251_GROUP_BEGIN };
+	u8 frame[] = { OV7251_TIMING_VTS_REG >> 8,
+		       OV7251_TIMING_VTS_REG & 0xff, vts >> 8, vts & 0xff };
+	u8 integration[] = { OV7251_AEC_EXPO_0 >> 8,
+			     OV7251_AEC_EXPO_0 & 0xff,
+			     (exposure & 0xf000) >> 12,
+			     (exposure & 0x0ff0) >> 4,
+			     (exposure & 0x000f) << 4 };
+	u8 analogue_gain[] = { OV7251_AEC_AGC_ADJ_0 >> 8,
+			       OV7251_AEC_AGC_ADJ_0 & 0xff,
+			       (gain & 0x0300) >> 8, gain & 0xff };
+	u8 end[] = { OV7251_GROUP_ACCESS >> 8,
+		     OV7251_GROUP_ACCESS & 0xff, OV7251_GROUP_END };
+	struct i2c_msg msgs[] = {
+		{ .buf = begin, .len = sizeof(begin) },
+		{ .buf = frame, .len = sizeof(frame) },
+		{ .buf = integration, .len = sizeof(integration) },
+		{ .buf = analogue_gain, .len = sizeof(analogue_gain) },
+		{ .buf = end, .len = sizeof(end) },
+	};
+	int i, ret;
+
+	/* A group launch needs frame boundaries. Program standby directly. */
+	if (!ov7251->streaming) {
+		ret = ov7251_vts_configure(ov7251, vblank);
+		if (!ret)
+			ret = ov7251_set_exposure(ov7251, exposure);
+		if (!ret)
+			ret = ov7251_set_gain(ov7251, gain);
+		return ret;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(msgs); i++) {
+		msgs[i].addr = client->addr;
+		msgs[i].flags = client->flags & I2C_M_TEN;
+	}
+	/* One transfer lets CCI execute the entire group without waking the
+	 * exposure worker between register writes. Keep launch separate: a
+	 * partial transfer must never publish partially programmed settings.
+	 */
+	if (timing)
+		timing->batch_start_ns = ktime_get_ns();
+	ret = i2c_transfer(client->adapter, msgs, ARRAY_SIZE(msgs));
+	if (timing)
+		timing->batch_done_ns = ktime_get_ns();
+	if (ret != ARRAY_SIZE(msgs)) {
+		if (ret >= 0)
+			ret = -EIO;
+		ov7251_write_reg(ov7251, OV7251_GROUP_ACCESS, OV7251_GROUP_END);
+		goto fail;
+	}
+
+	if (timing)
+		timing->launch_start_ns = ktime_get_ns();
+	ret = ov7251_write_reg(ov7251, OV7251_GROUP_ACCESS,
+			       OV7251_GROUP_LAUNCH);
+	if (timing)
+		timing->launch_done_ns = ktime_get_ns();
+	if (!ret)
+		return 0;
+
+fail:
+	/* Only a successful power-on reset clears uncertain group state. */
+	ov7251->group_error = true;
+	return ret;
+}
+
 static int ov7251_s_ctrl(struct v4l2_ctrl *ctrl)
 {
 	struct ov7251 *ov7251 = container_of(ctrl->handler,
 					     struct ov7251, ctrls);
 	int ret;
+
+	if (ov7251->frame_owned && (ctrl->id == V4L2_CID_EXPOSURE ||
+				     ctrl->id == V4L2_CID_VBLANK))
+		return -EBUSY;
+	if (ov7251->group_error)
+		return -EIO;
 
 	/* If VBLANK is altered we need to update exposure to compensate */
 	if (ctrl->id == V4L2_CID_VBLANK) {
@@ -1035,25 +1381,34 @@ static int ov7251_s_ctrl(struct v4l2_ctrl *ctrl)
 
 		exposure_max = ov7251->current_mode->height + ctrl->val -
 			       OV7251_INTEGRATION_MARGIN;
-		__v4l2_ctrl_modify_range(ov7251->exposure,
+		ov7251->pending_vblank = ctrl->val;
+		ov7251->updating_vblank = true;
+		ret = __v4l2_ctrl_modify_range(ov7251->exposure,
 					 ov7251->exposure->minimum,
 					 exposure_max,
 					 ov7251->exposure->step,
-					 min(ov7251->exposure->val,
+					 min(ov7251->exposure->cur.val,
 					     exposure_max));
+		ov7251->updating_vblank = false;
+		if (ret)
+			return ret;
 	}
 
 	/* v4l2_ctrl_lock() locks our mutex */
 
-	if (!pm_runtime_get_if_in_use(ov7251->dev))
-		return 0;
+	ret = pm_runtime_get_if_in_use(ov7251->dev);
+	if (ret <= 0)
+		return ret;
 
 	switch (ctrl->id) {
-	case V4L2_CID_EXPOSURE:
-		ret = ov7251_set_exposure(ov7251, ctrl->val);
+	case V4L2_CID_OV7251_FRAME_SYNC:
+		ret = ov7251_configure_sync(ov7251);
 		break;
-	case V4L2_CID_GAIN:
-		ret = ov7251_set_gain(ov7251, ctrl->val);
+	case V4L2_CID_EXPOSURE:
+		ret = ov7251_set_exposure_group(ov7251,
+			ov7251->updating_vblank ? ov7251->pending_vblank :
+			ov7251->vblank->cur.val,
+			ov7251->exposure->val, ov7251->gain->val, NULL);
 		break;
 	case V4L2_CID_TEST_PATTERN:
 		ret = ov7251_set_test_pattern(ov7251, ctrl->val);
@@ -1065,7 +1420,8 @@ static int ov7251_s_ctrl(struct v4l2_ctrl *ctrl)
 		ret = ov7251_set_vflip(ov7251, ctrl->val);
 		break;
 	case V4L2_CID_VBLANK:
-		ret = ov7251_vts_configure(ov7251, ctrl->val);
+		ret = ov7251_set_exposure_group(ov7251, ctrl->val,
+			ov7251->exposure->cur.val, ov7251->gain->cur.val, NULL);
 		break;
 	default:
 		ret = -EINVAL;
@@ -1079,6 +1435,21 @@ static int ov7251_s_ctrl(struct v4l2_ctrl *ctrl)
 
 static const struct v4l2_ctrl_ops ov7251_ctrl_ops = {
 	.s_ctrl = ov7251_s_ctrl,
+};
+
+static const char * const ov7251_frame_sync_menu[] = {
+	"Free Running", "VSYNC Output", "FSIN Input",
+};
+
+static const struct v4l2_ctrl_config ov7251_frame_sync_ctrl = {
+	.ops = &ov7251_ctrl_ops,
+	.id = V4L2_CID_OV7251_FRAME_SYNC,
+	.name = "Frame Synchronization",
+	.type = V4L2_CTRL_TYPE_MENU,
+	.min = OV7251_FRAME_SYNC_FREE_RUNNING,
+	.max = OV7251_FRAME_SYNC_SLAVE,
+	.def = OV7251_FRAME_SYNC_FREE_RUNNING,
+	.qmenu = ov7251_frame_sync_menu,
 };
 
 static int ov7251_enum_mbus_code(struct v4l2_subdev *sd,
@@ -1261,6 +1632,9 @@ static int ov7251_set_format(struct v4l2_subdev *sd,
 			goto exit;
 
 		ov7251->current_mode = new_mode;
+		ret = __v4l2_ctrl_s_ctrl(ov7251->vblank, vblank_def);
+		if (ret < 0)
+			goto exit;
 	}
 
 	__format = __ov7251_get_pad_format(ov7251, sd_state, format->pad,
@@ -1340,11 +1714,21 @@ static int ov7251_s_stream(struct v4l2_subdev *subdev, int enable)
 
 	mutex_lock(&ov7251->lock);
 
+	if (!!enable == ov7251->streaming) {
+		mutex_unlock(&ov7251->lock);
+		return 0;
+	}
+
 	if (enable) {
 		ret = pm_runtime_resume_and_get(ov7251->dev);
 		if (ret) {
 			mutex_unlock(&ov7251->lock);
 			return ret;
+		}
+
+		if (ov7251->group_error) {
+			ret = -EIO;
+			goto err_power_down;
 		}
 
 		ret = ov7251_pll_configure(ov7251);
@@ -1371,9 +1755,19 @@ static int ov7251_s_stream(struct v4l2_subdev *subdev, int enable)
 				       OV7251_SC_MODE_SELECT_STREAMING);
 		if (ret)
 			goto err_power_down;
+		ov7251->streaming = true;
+		__v4l2_ctrl_grab(ov7251->frame_sync, true);
 	} else {
 		ret = ov7251_write_reg(ov7251, OV7251_SC_MODE_SELECT,
 				       OV7251_SC_MODE_SELECT_SW_STANDBY);
+		/* Release the shared sync pin before another sensor may drive it. */
+		ov7251_write_reg(ov7251, 0x3005, 0x00);
+		ov7251->streaming = false;
+		ov7251->frame_owned = false;
+		__v4l2_ctrl_grab(ov7251->exposure, false);
+		__v4l2_ctrl_grab(ov7251->gain, false);
+		__v4l2_ctrl_grab(ov7251->vblank, false);
+		__v4l2_ctrl_grab(ov7251->frame_sync, false);
 		pm_runtime_put(ov7251->dev);
 	}
 
@@ -1381,6 +1775,7 @@ static int ov7251_s_stream(struct v4l2_subdev *subdev, int enable)
 	return ret;
 
 err_power_down:
+	ov7251->streaming = false;
 	pm_runtime_put(ov7251->dev);
 	mutex_unlock(&ov7251->lock);
 	return ret;
@@ -1443,6 +1838,17 @@ static int ov7251_set_frame_interval(struct v4l2_subdev *subdev,
 		ov7251->current_mode = new_mode;
 	}
 
+	/* STREAMON reapplies VBLANK after the mode's register table. */
+	ret = __v4l2_ctrl_modify_range(ov7251->vblank, OV7251_TIMING_MIN_VTS,
+				     OV7251_TIMING_MAX_VTS - new_mode->height, 1,
+				     new_mode->vts - new_mode->height);
+	if (ret < 0)
+		goto exit;
+	ret = __v4l2_ctrl_s_ctrl(ov7251->vblank,
+				 new_mode->vts - new_mode->height);
+	if (ret < 0)
+		goto exit;
+
 	fi->interval = ov7251->current_mode->timeperframe;
 
 exit:
@@ -1466,7 +1872,78 @@ static const struct v4l2_subdev_pad_ops ov7251_subdev_pad_ops = {
 	.set_frame_interval = ov7251_set_frame_interval,
 };
 
+static long ov7251_frame_command(struct v4l2_subdev *sd, unsigned int cmd,
+			      void *arg)
+{
+	struct ov7251 *ov7251 = to_ov7251(sd);
+	struct ov7251_frame_group *group = arg;
+	struct ov7251_apply_timing timing = { 0 };
+	int ret = 0;
+
+	if (cmd != OV7251_SUBDEV_FRAME_GROUP)
+		return -ENOIOCTLCMD;
+	timing.entry_ns = ktime_get_ns();
+	mutex_lock(&ov7251->lock);
+	timing.locked_ns = ktime_get_ns();
+	if (group->action == OV7251_FRAME_RELEASE) {
+		ov7251->frame_owned = false;
+		__v4l2_ctrl_grab(ov7251->exposure, false);
+		__v4l2_ctrl_grab(ov7251->gain, false);
+		__v4l2_ctrl_grab(ov7251->vblank, false);
+		goto out;
+	}
+	if (!ov7251->streaming || ov7251->group_error) {
+		ret = -EIO;
+		goto out;
+	}
+	if (group->action == OV7251_FRAME_ACQUIRE) {
+		if (ov7251->frame_owned) {
+			ret = -EBUSY;
+			goto out;
+		}
+		ov7251->frame_owned = true;
+		__v4l2_ctrl_grab(ov7251->exposure, true);
+		__v4l2_ctrl_grab(ov7251->gain, true);
+		__v4l2_ctrl_grab(ov7251->vblank, true);
+		goto out;
+	}
+	if (group->action != OV7251_FRAME_APPLY || !ov7251->frame_owned) {
+		ret = -EINVAL;
+		goto out;
+	}
+	if (group->frame_length_lines <= ov7251->current_mode->height ||
+	    group->frame_length_lines > OV7251_TIMING_MAX_VTS ||
+	    !group->exposure_lines || group->exposure_lines >
+	    group->frame_length_lines - OV7251_INTEGRATION_MARGIN ||
+	    group->analogue_gain < 16 || group->analogue_gain > 1023) {
+		ret = -ERANGE;
+		goto out;
+	}
+	ret = ov7251_set_exposure_group(ov7251,
+		group->frame_length_lines - ov7251->current_mode->height,
+		group->exposure_lines, group->analogue_gain, &timing);
+	if (!ret)
+		group->exposure_ns = div_u64((u64)group->exposure_lines *
+			OV7251_FIXED_PPL * NSEC_PER_SEC,
+			pixel_rates[ov7251->link_freq_idx]);
+out:
+	mutex_unlock(&ov7251->lock);
+	if (group->action == OV7251_FRAME_APPLY) {
+		timing.return_ns = ktime_get_ns();
+		timing.exposure_lines = group->exposure_lines;
+		timing.gain = group->analogue_gain;
+		timing.result = ret;
+		ov7251_timing_save(ov7251, &timing);
+	}
+	return ret;
+}
+
+static const struct v4l2_subdev_core_ops ov7251_core_ops = {
+	.command = ov7251_frame_command,
+};
+
 static const struct v4l2_subdev_ops ov7251_subdev_ops = {
+	.core = &ov7251_core_ops,
 	.video = &ov7251_video_ops,
 	.pad = &ov7251_subdev_pad_ops,
 };
@@ -1568,8 +2045,10 @@ static int ov7251_init_ctrls(struct ov7251 *ov7251)
 	s64 pixel_rate;
 	int hblank;
 
-	v4l2_ctrl_handler_init(&ov7251->ctrls, 7);
+	v4l2_ctrl_handler_init(&ov7251->ctrls, 11);
 	ov7251->ctrls.lock = &ov7251->lock;
+	ov7251->frame_sync = v4l2_ctrl_new_custom(&ov7251->ctrls,
+						 &ov7251_frame_sync_ctrl, NULL);
 
 	v4l2_ctrl_new_std(&ov7251->ctrls, &ov7251_ctrl_ops,
 			  V4L2_CID_HFLIP, 0, 1, 1, 0);
@@ -1622,6 +2101,12 @@ static int ov7251_init_ctrls(struct ov7251 *ov7251)
 		return ov7251->ctrls.error;
 	}
 
+	/* The control framework retains this persistent cluster array. */
+	ov7251->exposure_cluster[0] = ov7251->exposure;
+	ov7251->exposure_cluster[1] = ov7251->gain;
+	v4l2_ctrl_cluster(ARRAY_SIZE(ov7251->exposure_cluster),
+			  ov7251->exposure_cluster);
+
 	return 0;
 }
 
@@ -1629,6 +2114,8 @@ static int ov7251_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
 	struct ov7251 *ov7251;
+	struct dentry *timing;
+	char *timing_name;
 	int ret;
 	int i;
 
@@ -1687,6 +2174,7 @@ static int ov7251_probe(struct i2c_client *client)
 	}
 
 	mutex_init(&ov7251->lock);
+	spin_lock_init(&ov7251->timing_lock);
 
 	ov7251->current_mode = &ov7251_mode_info_data[0];
 	ret = ov7251_init_ctrls(ov7251);
@@ -1755,6 +2243,17 @@ static int ov7251_probe(struct i2c_client *client)
 	}
 
 	ov7251_init_state(&ov7251->sd, NULL);
+	timing_name = devm_kasprintf(dev, GFP_KERNEL, "ov7251-timing-%s", dev_name(dev));
+	if (timing_name) {
+		timing = debugfs_create_dir(timing_name, NULL);
+		if (!IS_ERR_OR_NULL(timing)) {
+			debugfs_create_file("slow-applies", 0400, timing, ov7251,
+					    &ov7251_timing_fops);
+			ret = devm_add_action_or_reset(dev, ov7251_timing_remove, timing);
+			if (ret)
+				dev_dbg(dev, "optional timing debugfs unavailable: %d\n", ret);
+		}
+	}
 
 	return 0;
 

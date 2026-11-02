@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/media/i2c/sony,imx471.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Sony IMX471 CMOS image sensor
+
+maintainers:
+  - Kate Hsuan <hpa@redhat.com>
+
+description:
+  Sony IMX471 image sensor with an I2C control interface and a MIPI CSI-2
+  output. The current driver supports a 19.2 MHz input clock and four lanes.
+
+$ref: /schemas/media/video-interface-devices.yaml#
+
+properties:
+  compatible:
+    const: sony,imx471
+  reg:
+    maxItems: 1
+  clocks:
+    maxItems: 1
+  reset-gpios:
+    maxItems: 1
+    description: Active-low XCLR input.
+  vana-supply:
+    description: Analog supply, 2.8 V.
+  vdig-supply:
+    description: Digital core supply, 1.05 V.
+  vif-supply:
+    description: Digital interface supply, 1.8 V.
+  port:
+    $ref: /schemas/graph.yaml#/$defs/port-base
+    unevaluatedProperties: false
+    properties:
+      endpoint:
+        $ref: /schemas/media/video-interfaces.yaml#
+        unevaluatedProperties: false
+        properties:
+          data-lanes:
+            items:
+              - const: 1
+              - const: 2
+              - const: 3
+              - const: 4
+          link-frequencies: true
+        required:
+          - data-lanes
+          - link-frequencies
+
+required:
+  - compatible
+  - reg
+  - clocks
+  - vana-supply
+  - vdig-supply
+  - vif-supply
+  - port
+
+unevaluatedProperties: false
