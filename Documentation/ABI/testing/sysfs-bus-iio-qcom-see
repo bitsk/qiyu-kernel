@@ -1,0 +1,87 @@
+What: /sys/bus/iio/devices/iio:deviceX/in_accel_sampling_frequency_reported
+What: /sys/bus/iio/devices/iio:deviceX/in_anglvel_sampling_frequency_reported
+Date: October 2026
+Contact: linux-iio@vger.kernel.org
+Description:
+        Last rate in Hz reported by the SEE physical configuration event,
+        or zero when no configuration event has been received for this stream.
+        This is not a measurement of sample intervals. sampling_frequency is
+        the requested rate; sampling_frequency_available lists the sensor's
+        ordinary rates, excluding additional low-latency-only rates. Configure
+        the requested rate while the IIO buffer is disabled.
+
+What: /sys/bus/iio/devices/iio:deviceX/in_accel_sensor_id
+What: /sys/bus/iio/devices/iio:deviceX/in_anglvel_sensor_id
+Date: October 2026
+Contact: linux-iio@vger.kernel.org
+Description:
+        Selected SEE sensor UID as 32 hexadecimal digits (high then low word).
+        The selected accel/gyro data types provide factory-calibrated SI samples
+        in SEE X,Y,Z order, stored as signed micro-m/s^2 or micro-rad/s. This does
+        not establish their mounting transform to the headset or cameras.
+
+What: /sys/bus/iio/devices/iio:deviceX/in_accel_accuracy
+What: /sys/bus/iio/devices/iio:deviceX/in_anglvel_accuracy
+Date: October 2026
+Contact: linux-iio@vger.kernel.org
+Description:
+        Accuracy field of the most recently received SEE sample: 0 unreliable,
+        1 low, 2 medium, 3 high. Reset to zero on stream enable. This latest-value
+        attribute does not attach status to an earlier buffered sample and
+        does not certify device-level calibration or camera/IMU alignment.
+
+What: /sys/bus/iio/devices/iio:deviceX/buffer/flush
+Date: October 2026
+Contact: linux-iio@vger.kernel.org
+Description:
+        Writing 1 while streaming requests SEE to publish pending events and
+        waits up to two seconds for its flush-complete event. Samples are
+        delivered into the ordinary IIO buffer, with their original sensor
+        timestamps. This operation flushes all pending events for the stream;
+        it is not the count-limited IIO hwfifo_flush_to_buffer callback.
+
+What: /sys/bus/iio/devices/iio:deviceX/buffer/flush_count
+Date: October 2026
+Contact: linux-iio@vger.kernel.org
+Description:
+        Number of SEE flush-complete events since this device registered.
+        Report delay is configured, while disabled, by buffer/hwfifo_timeout
+        in seconds. Zero selects immediate delivery. Other clients or capacity
+        limits may cause earlier delivery; each sample retains its own DSP
+        timestamp. IIO buffer/watermark remains a host read/poll threshold.
+        On A081, SEE sample ticks share the AP 19.2 MHz QTimer epoch. Each
+        timestamp is mapped into current_timestamp_clock by bracketing an AP
+        counter read with IIO clock reads and subtracting the sample's age.
+        Reception or stream start does not define a separate sensor epoch.
+        Batch delay therefore does not shift the sample time. Mapping error
+        includes the clock-read bracket and clock discipline over sample age;
+        it is not an exposure timestamp or a camera/IMU calibration guarantee.
+
+What: /sys/bus/iio/devices/iio:deviceX/in_proximity0_near_raw
+What: /sys/bus/iio/devices/iio:deviceX/in_proximity1_adc_raw
+Date: October 2026
+Contact: linux-iio@vger.kernel.org
+Description:
+        qcom-see-proximity exposes the SEE on-change proximity event as two
+        signed 32-bit scan channels: channel 0 is FAR=0 / NEAR=1, channel 1 is
+        the raw sensor ADC count. Neither channel measures a distance in metres
+        or establishes that the headset is worn. Both channels plus a signed
+        64-bit timestamp form a 16-byte scan when timestamp is enabled.
+
+        A direct sysfs read enables the on-change request, waits up to two
+        seconds for the initial event and disables the request. Direct reads
+        return EBUSY while buffered acquisition is enabled. The buffer reports
+        the initial state and subsequent changes; it has no periodic sampling
+        frequency control. Initial timestamps may refer to an earlier state
+        transition, as specified by SEE, rather than this client's enable time.
+
+What: /sys/bus/iio/devices/iio:deviceX/in_proximity_sensor_id
+What: /sys/bus/iio/devices/iio:deviceX/in_proximity_accuracy
+Date: October 2026
+Contact: linux-iio@vger.kernel.org
+Description:
+        The UID and latest SEE sample status have the same format as the
+        corresponding inertial attributes. Both channels in a sensor share
+        one UID and status. Status is reset on enable and is not embedded in
+        each buffered scan. On-change requests use sns_std_sensor message 514;
+        proximity events use sns_proximity message 769.

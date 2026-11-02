@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0
+obj-$(CONFIG_QCOM_SEE) += qcom-see.o
 #
 # Makefile for Inertial Measurement Units
 #
