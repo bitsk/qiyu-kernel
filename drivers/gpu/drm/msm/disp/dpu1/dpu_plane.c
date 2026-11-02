@@ -8,6 +8,7 @@
 #define pr_fmt(fmt)	"[drm:%s:%d] " fmt, __func__, __LINE__
 
 #include <linux/debugfs.h>
+#include <linux/moduleparam.h>
 #include <linux/dma-buf.h>
 
 #include <drm/drm_atomic.h>
@@ -45,6 +46,10 @@
 #define SHARP_NOISE_THR_DEFAULT	2
 
 #define DPU_PLANE_COLOR_FILL_FLAG	BIT(31)
+
+static unsigned int a081_solid_fill;
+module_param(a081_solid_fill, uint, 0400);
+MODULE_PARM_DESC(a081_solid_fill, "A081 scanout diagnosis: bit 31 enables hardware BGR fill");
 #define DPU_ZPOS_MAX 255
 
 /*
@@ -137,7 +142,7 @@ static u64 _dpu_plane_calc_bw(const struct dpu_mdss_cfg *catalog,
 	scale_factor = src_height > dst_height ?
 		mult_frac(src_height, 1, dst_height) : 1;
 
-	plane_pixel_rate = src_width * mode->vtotal * fps;
+	plane_pixel_rate = (u64)src_width * mode->vtotal * fps;
 	plane_bit_rate = plane_pixel_rate * fmt->bpp;
 
 	plane_bw = plane_bit_rate * scale_factor;
@@ -174,7 +179,7 @@ static u64 _dpu_plane_calc_clk(const struct drm_display_mode *mode,
 	fps = drm_mode_vrefresh(mode);
 
 	plane_clk =
-		dst_width * mode->vtotal * fps;
+		(u64)dst_width * mode->vtotal * fps;
 
 	if (src_height > dst_height) {
 		plane_clk *= src_height;
@@ -1048,6 +1053,27 @@ static bool dpu_plane_get_single_pipe_in_stage(struct dpu_plane_state *pstate,
 	return false;
 }
 
+static void dpu_plane_calc_perf(const struct dpu_mdss_cfg *catalog,
+                                const struct msm_format *fmt,
+                                const struct drm_display_mode *mode,
+                                struct dpu_plane_state *pstate)
+{
+	int i;
+
+	pstate->plane_fetch_bw = 0;
+	pstate->plane_clk = 0;
+	for (i = 0; i < PIPES_PER_PLANE; i++) {
+		if (!drm_rect_width(&pstate->pipe_cfg[i].src_rect))
+			continue;
+		pstate->plane_fetch_bw += _dpu_plane_calc_bw(catalog, fmt,
+							     mode, &pstate->pipe_cfg[i]);
+
+		pstate->plane_clk = max(pstate->plane_clk,
+					_dpu_plane_calc_clk(mode,
+							    &pstate->pipe_cfg[i]));
+	}
+}
+
 static int dpu_plane_atomic_check_sspp(struct drm_plane *plane,
 				       struct drm_atomic_commit *state,
 				       const struct drm_crtc_state *crtc_state)
@@ -1074,6 +1100,15 @@ static int dpu_plane_atomic_check_sspp(struct drm_plane *plane,
 			return ret;
 	}
 
+	dpu_plane_calc_perf(pdpu->catalog, msm_framebuffer_format(new_plane_state->fb),
+			    &crtc_state->adjusted_mode, pstate);
+	DRM_DEBUG_DRIVER("DPU_PLANE_PLAN id=%u clk=%llu bw=%llu left=%d right=%d left_sspp=%d right_sspp=%d multirect=%d\n",
+		plane->base.id, pstate->plane_clk, pstate->plane_fetch_bw,
+		drm_rect_width(&pstate->pipe_cfg[0].src_rect),
+		drm_rect_width(&pstate->pipe_cfg[1].src_rect),
+		pstate->pipe[0].sspp ? (int)pstate->pipe[0].sspp->idx : -1,
+		pstate->pipe[1].sspp ? (int)pstate->pipe[1].sspp->idx : -1,
+		pstate->pipe[0].multirect_mode);
 	return 0;
 }
 
@@ -1430,7 +1465,11 @@ void dpu_plane_flush(struct drm_plane *plane)
 	 * These updates have to be done immediately before the plane flush
 	 * timing, and may not be moved to the atomic_update/mode_set functions.
 	 */
-	if (pdpu->is_error)
+	if (a081_solid_fill & DPU_PLANE_COLOR_FILL_FLAG) {
+		pr_info_once("A081_DPU_SOLID_FILL color=%06x memory_fetch=bypassed\n",
+			     a081_solid_fill & 0xffffff);
+		_dpu_plane_color_fill(pdpu, a081_solid_fill, 0xff);
+	} else if (pdpu->is_error)
 		/* force white frame with 100% alpha pipe output on error */
 		_dpu_plane_color_fill(pdpu, 0xFFFFFF, 0xFF);
 	else if (pdpu->color_fill & DPU_PLANE_COLOR_FILL_FLAG)
@@ -1571,18 +1610,6 @@ static void dpu_plane_sspp_atomic_update(struct drm_plane *plane,
 	if (pstate->needs_qos_remap)
 		pstate->needs_qos_remap = false;
 
-	pstate->plane_fetch_bw = 0;
-	pstate->plane_clk = 0;
-	for (i = 0; i < PIPES_PER_PLANE; i++) {
-		if (!drm_rect_width(&pstate->pipe_cfg[i].src_rect))
-			continue;
-		pstate->plane_fetch_bw += _dpu_plane_calc_bw(pdpu->catalog, fmt,
-							     &crtc->mode, &pstate->pipe_cfg[i]);
-
-		pstate->plane_clk = max(pstate->plane_clk,
-					_dpu_plane_calc_clk(&crtc->mode,
-							    &pstate->pipe_cfg[i]));
-	}
 }
 
 static void _dpu_plane_atomic_disable(struct drm_plane *plane)

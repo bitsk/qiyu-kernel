@@ -539,16 +539,17 @@ restore_host0:
 	return ret;
 }
 
-bool msm_dsi_manager_cmd_xfer_trigger(int id, u32 dma_base, u32 len)
+bool msm_dsi_manager_cmd_xfer_trigger(int id, u32 dma_base, u32 len, bool sync)
 {
 	struct msm_dsi *msm_dsi = dsi_mgr_get_dsi(id);
 	struct msm_dsi *msm_dsi0 = dsi_mgr_get_dsi(DSI_0);
 	struct mipi_dsi_host *host = msm_dsi->host;
 
-	if (IS_SYNC_NEEDED() && (id == DSI_0))
+	/* Reads, including their return-size setup, are unicast. */
+	if (sync && IS_SYNC_NEEDED() && (id == DSI_0))
 		return false;
 
-	if (IS_SYNC_NEEDED() && msm_dsi0)
+	if (sync && IS_SYNC_NEEDED() && msm_dsi0)
 		msm_dsi_host_cmd_xfer_commit(msm_dsi0->host, dma_base, len);
 
 	msm_dsi_host_cmd_xfer_commit(host, dma_base, len);

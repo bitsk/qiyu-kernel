@@ -283,6 +283,10 @@ static bool dpu_crtc_get_scanout_position(struct drm_crtc *crtc,
 		return false;
 	}
 
+	/* Command-mode TE counters are not video raster positions. */
+	if (dpu_encoder_get_intf_mode(encoder) != INTF_MODE_VIDEO)
+		return false;
+
 	vsw = mode->crtc_vsync_end - mode->crtc_vsync_start;
 	vbp = mode->crtc_vtotal - mode->crtc_vsync_end;
 
@@ -302,10 +306,12 @@ static bool dpu_crtc_get_scanout_position(struct drm_crtc *crtc,
 		*stime = ktime_get();
 
 	line = dpu_encoder_get_linecount(encoder);
+	if (line <= 0 || line > vfp_end)
+		return false;
 
 	if (line < vactive_start)
 		line -= vactive_start;
-	else if (line > vactive_end)
+	else if (line >= vactive_end)
 		line = line - vfp_end - vactive_start;
 	else
 		line -= vactive_start;
@@ -981,6 +987,10 @@ static void dpu_crtc_atomic_flush(struct drm_crtc *crtc,
 	if (unlikely(!cstate->num_mixers))
 		return;
 
+	/* Only accepted commits acquire a per-frame bandwidth vote. */
+	if (drm_atomic_crtc_effectively_active(crtc->state))
+		atomic_inc(&_dpu_crtc_get_kms(crtc)->bandwidth_ref);
+
 	/* update performance setting before crtc kickoff */
 	dpu_core_perf_crtc_update(crtc, 1);
 
@@ -1245,12 +1255,17 @@ static void dpu_crtc_disable(struct drm_crtc *crtc,
 	if (atomic_read(&dpu_crtc->frame_pending)) {
 		trace_dpu_crtc_disable_frame_pending(DRMID(crtc),
 				     atomic_read(&dpu_crtc->frame_pending));
-		if (release_bandwidth)
-			dpu_core_perf_crtc_release_bw(crtc);
 		atomic_set(&dpu_crtc->frame_pending, 0);
 	}
 
+	/* The video-mode lifetime vote survives frame completion. */
+	if (release_bandwidth)
+		dpu_core_perf_crtc_release_bw(crtc);
+
 	dpu_core_perf_crtc_update(crtc, 0);
+	DRM_DEBUG_DRIVER("DPU_BW_IDLE refs=%d pending=%d\n",
+		atomic_read(&_dpu_crtc_get_kms(crtc)->bandwidth_ref),
+		atomic_read(&dpu_crtc->frame_pending));
 
 	/* disable clk & bw control until clk & bw properties are set */
 	cstate->bw_control = false;
@@ -1485,6 +1500,8 @@ static int dpu_crtc_assign_resources(struct drm_crtc *crtc,
 	}
 
 	cstate->num_mixers = num_lm;
+	DRM_DEBUG_DRIVER("DPU_RESOURCE_PLAN lm=%d dsc=%d intf=%d ctl=%d\n",
+		num_lm, topology.num_dsc, topology.num_intf, num_ctl);
 
 	return 0;
 }
@@ -1517,6 +1534,21 @@ int dpu_crtc_check_mode_changed(struct drm_crtc_state *old_crtc_state,
 		new_crtc_state->mode_changed = true;
 
 	return 0;
+}
+
+/* All outputs of a cloned CRTC must have buffering to omit link blanking. */
+bool dpu_crtc_has_dsc(const struct drm_crtc_state *state)
+{
+	struct drm_encoder *encoder;
+	bool found = false;
+
+	drm_for_each_encoder_mask(encoder, state->crtc->dev, state->encoder_mask) {
+		if (!dpu_encoder_get_dsc_config(encoder))
+			return false;
+		found = true;
+	}
+
+	return found;
 }
 
 static int dpu_crtc_atomic_check(struct drm_crtc *crtc,
@@ -1584,8 +1616,6 @@ static int dpu_crtc_atomic_check(struct drm_crtc *crtc,
 		dpu_pstate->needs_dirtyfb = needs_dirtyfb;
 	}
 
-	atomic_inc(&_dpu_crtc_get_kms(crtc)->bandwidth_ref);
-
 	rc = dpu_core_perf_crtc_check(crtc, crtc_state);
 	if (rc) {
 		DPU_ERROR("crtc%d failed performance check %d\n",
@@ -1609,17 +1639,22 @@ static enum drm_mode_status dpu_crtc_mode_valid(struct drm_crtc *crtc,
 	    mode->hdisplay > dpu_kms->catalog->caps->max_mixer_width)
 		return MODE_BAD_HVALUE;
 
-	adjusted_mode_clk = dpu_core_perf_adjusted_mode_clk(mode->clock,
+	/* Configuration-invariant lower bound; atomic_check validates
+	 * the assigned mixer count and whether every output uses DSC.
+	 */
+	adjusted_mode_clk = dpu_core_perf_mode_clk(mode,
+		dpu_kms->catalog->caps->has_3d_merge ? 2 : 1,
+		dpu_kms->catalog->dsc_count > 0);
+	if (adjusted_mode_clk == U64_MAX)
+		return MODE_CLOCK_HIGH;
+	adjusted_mode_clk = dpu_core_perf_adjusted_mode_clk(adjusted_mode_clk,
 							    dpu_kms->perf.perf_cfg);
-
-	if (dpu_kms->catalog->caps->has_3d_merge)
-		adjusted_mode_clk /= 2;
 
 	/*
 	 * The given mode, adjusted for the perf clock factor, should not exceed
 	 * the max core clock rate
 	 */
-	if (dpu_kms->perf.max_core_clk_rate < adjusted_mode_clk * 1000)
+	if (dpu_kms->perf.max_core_clk_rate < adjusted_mode_clk)
 		return MODE_CLOCK_HIGH;
 
 	/*
@@ -1818,6 +1853,8 @@ static int _dpu_crtc_init_debugfs(struct drm_crtc *crtc)
 {
 	struct dpu_crtc *dpu_crtc = to_dpu_crtc(crtc);
 
+	debugfs_create_atomic_t("frame_pending", 0400, crtc->debugfs_entry,
+				&dpu_crtc->frame_pending);
 	debugfs_create_file("status", 0400,
 			crtc->debugfs_entry,
 			dpu_crtc, &_dpu_debugfs_status_fops);

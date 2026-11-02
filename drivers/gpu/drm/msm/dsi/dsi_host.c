@@ -167,6 +167,8 @@ struct msm_dsi_host {
 	struct drm_display_mode *mode;
 	struct drm_dsc_config *dsc;
 	unsigned int dsc_slice_per_pkt;
+	/* Snapshot at attach: later host calculations also fill rc_model_size. */
+	bool dsc_has_panel_rc_params;
 
 	/* connected device info */
 	unsigned int channel;
@@ -1439,7 +1441,7 @@ int dsi_dma_base_get_v2(struct msm_dsi_host *msm_host, uint64_t *dma_base)
 	return 0;
 }
 
-static int dsi_cmd_dma_tx(struct msm_dsi_host *msm_host, int len)
+static int dsi_cmd_dma_tx(struct msm_dsi_host *msm_host, int len, bool sync)
 {
 	const struct msm_dsi_cfg_handler *cfg_hnd = msm_host->cfg_hnd;
 	int ret;
@@ -1457,7 +1459,7 @@ static int dsi_cmd_dma_tx(struct msm_dsi_host *msm_host, int len)
 	dsi_wait4video_eng_busy(msm_host);
 
 	triggered = msm_dsi_manager_cmd_xfer_trigger(
-						msm_host->id, dma_base, len);
+						msm_host->id, dma_base, len, sync);
 	if (triggered) {
 		ret = wait_for_completion_timeout(&msm_host->dma_comp,
 					msecs_to_jiffies(200));
@@ -1523,7 +1525,7 @@ static int dsi_cmd_dma_rx(struct msm_dsi_host *msm_host,
 }
 
 static int dsi_cmds2buf_tx(struct msm_dsi_host *msm_host,
-				const struct mipi_dsi_msg *msg)
+				const struct mipi_dsi_msg *msg, bool sync)
 {
 	int len, ret;
 	int bllp_len = msm_host->mode->hdisplay *
@@ -1552,7 +1554,7 @@ static int dsi_cmds2buf_tx(struct msm_dsi_host *msm_host,
 		return -EINVAL;
 	}
 
-	ret = dsi_cmd_dma_tx(msm_host, len);
+	ret = dsi_cmd_dma_tx(msm_host, len, sync);
 	if (ret < 0) {
 		pr_err("%s: cmd dma tx failed, type=0x%x, data0=0x%x, len=%d, ret=%d\n",
 			__func__, msg->type, (*(u8 *)(msg->tx_buf)), len, ret);
@@ -1563,7 +1565,10 @@ static int dsi_cmds2buf_tx(struct msm_dsi_host *msm_host,
 		return -EIO;
 	}
 
-	return len;
+	/* The host transfer API counts message bytes, not the DMA
+	 * header and alignment padding checked above.
+	 */
+	return msg->tx_len;
 }
 
 static void dsi_err_worker(struct work_struct *work)
@@ -1724,6 +1729,8 @@ static int dsi_host_attach(struct mipi_dsi_host *host,
 	msm_host->mode_flags = dsi->mode_flags;
 	if (dsi->dsc) {
 		msm_host->dsc = dsi->dsc;
+		/* A nonzero model size denotes panel-supplied RC parameters. */
+		msm_host->dsc_has_panel_rc_params = dsi->dsc->rc_model_size;
 		if (dsi->mode_flags & MIPI_DSI_MODE_DSC_ALL_SLICES_IN_PKT)
 			msm_host->dsc_slice_per_pkt = dsi->dsc->slice_count;
 		else
@@ -1906,13 +1913,18 @@ static int dsi_populate_dsc_params(struct msm_dsi_host *msm_host, struct drm_dsc
 	dsc->vbr_enable = 0;
 
 	drm_dsc_set_const_params(dsc);
-	drm_dsc_set_rc_buf_thresh(dsc);
-
-	/* DPU supports only pre-SCR panels */
-	ret = drm_dsc_setup_rc_params(dsc, DRM_DSC_1_1_PRE_SCR);
-	if (ret) {
-		DRM_DEV_ERROR(&msm_host->pdev->dev, "could not find DSC RC parameters\n");
-		return ret;
+	/* Preserve complete RC parameters explicitly supplied by a panel.
+	 * Replacing them with the default table can make the encoder
+	 * disagree with the panel's fixed vendor PPS (A081 is one case).
+	 * The attach-time flag keeps defaults recomputed on later modes.
+	 */
+	if (!msm_host->dsc_has_panel_rc_params) {
+		drm_dsc_set_rc_buf_thresh(dsc);
+		ret = drm_dsc_setup_rc_params(dsc, DRM_DSC_1_1_PRE_SCR);
+		if (ret) {
+			DRM_DEV_ERROR(&msm_host->pdev->dev, "could not find DSC RC parameters\n");
+			return ret;
+		}
 	}
 
 	dsc->initial_scale_value = drm_dsc_initial_scale_value(dsc);
@@ -2220,7 +2232,7 @@ int msm_dsi_host_cmd_tx(struct mipi_dsi_host *host,
 {
 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
 
-	return dsi_cmds2buf_tx(msm_host, msg);
+	return dsi_cmds2buf_tx(msm_host, msg, true);
 }
 
 int msm_dsi_host_cmd_rx(struct mipi_dsi_host *host,
@@ -2262,7 +2274,10 @@ int msm_dsi_host_cmd_rx(struct mipi_dsi_host *host,
 		DBG("rlen=%d pkt_size=%d rx_byte=%d",
 			rlen, pkt_size, rx_byte);
 
-		ret = dsi_cmds2buf_tx(msm_host, &max_pkt_size_msg);
+		/* Return-size setup and the read request must use the same
+		 * selected link, even when writes are broadcast.
+		 */
+		ret = dsi_cmds2buf_tx(msm_host, &max_pkt_size_msg, false);
 		if (ret < 2) {
 			pr_err("%s: Set max pkt size failed, %d\n",
 				__func__, ret);
@@ -2279,7 +2294,7 @@ int msm_dsi_host_cmd_rx(struct mipi_dsi_host *host,
 			wmb(); /* release cleared status before transfer */
 		}
 
-		ret = dsi_cmds2buf_tx(msm_host, msg);
+		ret = dsi_cmds2buf_tx(msm_host, msg, false);
 		if (ret < 0) {
 			pr_err("%s: Read cmd Tx failed, %d\n", __func__, ret);
 			return ret;

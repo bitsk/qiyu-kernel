@@ -30,6 +30,106 @@
 #define to_dpu_encoder_phys_vid(x) \
 	container_of(x, struct dpu_encoder_phys_vid, base)
 
+struct dpu_encoder_phys_vid {
+	struct dpu_encoder_phys base;
+	/* Nested inside enc_spinlock/DRM locks; never acquire them from here. */
+	spinlock_t counter_lock;
+	u32 counter;
+	u32 counter_last_hw;
+	bool counter_running;
+	bool counter_seeded;
+};
+
+static u32 dpu_encoder_phys_vid_counter_update(struct dpu_encoder_phys *phys_enc,
+					     bool first_irq)
+{
+	struct dpu_encoder_phys_vid *vid = to_dpu_encoder_phys_vid(phys_enc);
+	struct dpu_hw_intf_status s = {0};
+	const struct drm_display_mode *mode = &phys_enc->cached_mode;
+	u32 count, vblank_start;
+
+	lockdep_assert_held(&vid->counter_lock);
+	/* An IRQ establishes the new epoch after each start. Do not mistake
+	 * a reset or the stopped engine's zero for a 32-bit counter wrap.
+	 */
+	if (!vid->counter_running || (!vid->counter_seeded && !first_irq))
+		return vid->counter;
+
+	phys_enc->hw_intf->ops.get_status(phys_enc->hw_intf, &s);
+	if (!s.is_en || !s.line_count || s.line_count > mode->vtotal)
+		return vid->counter;
+
+	count = s.frame_count;
+	/* Keep the existing video leading-vblank convention. This is the
+	 * start of VFP, not the (possibly much later) programmable fetch.
+	 */
+	vblank_start = mode->vtotal - (mode->vsync_start - mode->vdisplay);
+	if (s.is_prog_fetch_en && s.line_count > vblank_start)
+		count++;
+
+	if (!vid->counter_seeded) {
+		/* Count the first observed IRQ, independent of the HW reset value. */
+		vid->counter++;
+		vid->counter_seeded = true;
+	} else {
+		/* A small modulo-forward delta includes normal 32-bit wrap.
+		 * A backwards/reset sample must establish a fresh IRQ epoch.
+		 */
+		if ((s32)(count - vid->counter_last_hw) < 0) {
+			vid->counter_seeded = false;
+			return vid->counter;
+		}
+		vid->counter += count - vid->counter_last_hw;
+	}
+	vid->counter_last_hw = count;
+	return vid->counter;
+}
+
+static void dpu_encoder_phys_vid_counter_start(struct dpu_encoder_phys *phys_enc)
+{
+	struct dpu_encoder_phys_vid *vid = to_dpu_encoder_phys_vid(phys_enc);
+	unsigned long flags;
+
+	/* The caller owns the runtime-PM reference before starting timing. */
+	spin_lock_irqsave(&vid->counter_lock, flags);
+	vid->counter_seeded = false;
+	/* Split video timing is driven by the master interface. Starting the
+	 * slave independently defeats that relationship. The stock A081
+	 * driver also leaves the slave TIMING_ENGINE_EN register clear.
+	 */
+	if (phys_enc->split_role != ENC_ROLE_SLAVE)
+		phys_enc->hw_intf->ops.enable_timing(phys_enc->hw_intf, 1);
+	vid->counter_running = true;
+	spin_unlock_irqrestore(&vid->counter_lock, flags);
+}
+
+static void dpu_encoder_phys_vid_counter_stop(struct dpu_encoder_phys *phys_enc)
+{
+	struct dpu_encoder_phys_vid *vid = to_dpu_encoder_phys_vid(phys_enc);
+	unsigned long flags;
+
+	/* Encoder disable precedes drm_crtc_vblank_off(). Freeze the last
+	 * live sample before requesting stop, while the clocks are held.
+	 * Later counter/timestamp callbacks must not access the registers.
+	 */
+	spin_lock_irqsave(&vid->counter_lock, flags);
+	dpu_encoder_phys_vid_counter_update(phys_enc, false);
+	vid->counter_running = false;
+	phys_enc->hw_intf->ops.enable_timing(phys_enc->hw_intf, 0);
+	spin_unlock_irqrestore(&vid->counter_lock, flags);
+}
+
+static void dpu_encoder_phys_vid_counter_irq(struct dpu_encoder_phys *phys_enc)
+{
+	struct dpu_encoder_phys_vid *vid = to_dpu_encoder_phys_vid(phys_enc);
+	unsigned long flags;
+
+	/* Drop this lock before the virtual encoder enters DRM's IRQ path. */
+	spin_lock_irqsave(&vid->counter_lock, flags);
+	dpu_encoder_phys_vid_counter_update(phys_enc, true);
+	spin_unlock_irqrestore(&vid->counter_lock, flags);
+}
+
 static bool dpu_encoder_phys_vid_is_master(
 		struct dpu_encoder_phys *phys_enc)
 {
@@ -39,6 +139,25 @@ static bool dpu_encoder_phys_vid_is_master(
 		ret = true;
 
 	return ret;
+}
+
+/* All callers already hold the video encoder's runtime-PM reference.
+ * IRQ callers also read the CTL registers in the existing handler. Never
+ * expose this helper as a debugfs or powered-off counter callback.
+ */
+static void dpu_encoder_phys_vid_trace_counter(struct dpu_encoder_phys *phys_enc,
+					      const char *phase)
+{
+	struct dpu_hw_intf_status status = {0};
+
+	if (!drm_debug_enabled(DRM_UT_DRIVER))
+		return;
+
+	phys_enc->hw_intf->ops.get_status(phys_enc->hw_intf, &status);
+	DRM_DEBUG_DRIVER("DPU_VBLANK_TRACE phase=%s intf=%u state=%u irq=%u en=%u fetch=%u frame=%u line=%u\n",
+		phase, phys_enc->hw_intf->idx, phys_enc->enable_state,
+		(u32)atomic_read(&phys_enc->vsync_cnt), status.is_en,
+		status.is_prog_fetch_en, status.frame_count, status.line_count);
 }
 
 static void drm_mode_to_intf_timing_params(
@@ -236,6 +355,9 @@ static void programmable_fetch_config(struct dpu_encoder_phys *phys_enc,
 		return;
 
 	vfp_fetch_lines = programmable_fetch_get_num_lines(phys_enc, timing);
+	DRM_DEBUG_DRIVER("DPU_VBLANK_FETCH intf=%u lines=%u vtotal=%u vfp=%u vbp=%u vsw=%u\n",
+		phys_enc->hw_intf->idx, vfp_fetch_lines, get_vertical_total(timing),
+		timing->v_front_porch, timing->v_back_porch, timing->vsync_pulse_width);
 	if (vfp_fetch_lines) {
 		vert_total = get_vertical_total(timing);
 		horiz_total = get_horizontal_total(timing);
@@ -342,6 +464,12 @@ static void dpu_encoder_phys_vid_vblank_irq(void *arg)
 	hw_ctl = phys_enc->hw_ctl;
 
 	DPU_ATRACE_BEGIN("vblank_irq");
+
+	dpu_encoder_phys_vid_counter_irq(phys_enc);
+	/* Two short IRQ bursts and sparse samples of the held-reference window. */
+	if ((u32)atomic_read(&phys_enc->vsync_cnt) < 16 ||
+	    (u32)atomic_read(&phys_enc->vsync_cnt) % 72 < 12)
+		dpu_encoder_phys_vid_trace_counter(phys_enc, "irq-before");
 
 	dpu_encoder_vblank_callback(phys_enc->parent, phys_enc);
 
@@ -602,7 +730,9 @@ static void dpu_encoder_phys_vid_disable(struct dpu_encoder_phys *phys_enc)
 	}
 
 	spin_lock_irqsave(phys_enc->enc_spinlock, lock_flags);
-	phys_enc->hw_intf->ops.enable_timing(phys_enc->hw_intf, 0);
+	dpu_encoder_phys_vid_trace_counter(phys_enc, "before-stop");
+	dpu_encoder_phys_vid_counter_stop(phys_enc);
+	dpu_encoder_phys_vid_trace_counter(phys_enc, "stop-requested");
 	if (dpu_encoder_phys_vid_is_master(phys_enc))
 		dpu_encoder_phys_inc_pending(phys_enc);
 	spin_unlock_irqrestore(phys_enc->enc_spinlock, lock_flags);
@@ -645,6 +775,7 @@ static void dpu_encoder_phys_vid_disable(struct dpu_encoder_phys *phys_enc)
 		}
 	}
 
+	dpu_encoder_phys_vid_trace_counter(phys_enc, "stop-waited");
 	dpu_encoder_helper_phys_cleanup(phys_enc);
 	phys_enc->enable_state = DPU_ENC_DISABLED;
 }
@@ -662,7 +793,9 @@ static void dpu_encoder_phys_vid_handle_post_kickoff(
 		trace_dpu_enc_phys_vid_post_kickoff(DRMID(phys_enc->parent),
 				    phys_enc->hw_intf->idx - INTF_0);
 		spin_lock_irqsave(phys_enc->enc_spinlock, lock_flags);
-		phys_enc->hw_intf->ops.enable_timing(phys_enc->hw_intf, 1);
+		dpu_encoder_phys_vid_trace_counter(phys_enc, "before-start");
+		dpu_encoder_phys_vid_counter_start(phys_enc);
+		dpu_encoder_phys_vid_trace_counter(phys_enc, "start-requested");
 		spin_unlock_irqrestore(phys_enc->enc_spinlock, lock_flags);
 		phys_enc->enable_state = DPU_ENC_ENABLED;
 	}
@@ -700,40 +833,31 @@ static void dpu_encoder_phys_vid_irq_disable(struct dpu_encoder_phys *phys_enc)
 static int dpu_encoder_phys_vid_get_line_count(
 		struct dpu_encoder_phys *phys_enc)
 {
+	struct dpu_encoder_phys_vid *vid = to_dpu_encoder_phys_vid(phys_enc);
+	unsigned long flags;
+	int line = -EINVAL;
+
 	if (!dpu_encoder_phys_vid_is_master(phys_enc))
 		return -EINVAL;
 
-	if (!phys_enc->hw_intf || !phys_enc->hw_intf->ops.get_line_count)
-		return -EINVAL;
-
-	return phys_enc->hw_intf->ops.get_line_count(phys_enc->hw_intf);
+	spin_lock_irqsave(&vid->counter_lock, flags);
+	if (vid->counter_running)
+		line = phys_enc->hw_intf->ops.get_line_count(phys_enc->hw_intf);
+	spin_unlock_irqrestore(&vid->counter_lock, flags);
+	return line;
 }
 
-static int dpu_encoder_phys_vid_get_frame_count(
+static u32 dpu_encoder_phys_vid_get_frame_count(
 		struct dpu_encoder_phys *phys_enc)
 {
-	struct dpu_hw_intf_status s = {0};
-	u32 fetch_start = 0;
-	struct drm_display_mode mode;
+	struct dpu_encoder_phys_vid *vid = to_dpu_encoder_phys_vid(phys_enc);
+	unsigned long flags;
+	u32 count;
 
-	drm_mode_init(&mode, &phys_enc->cached_mode);
-
-	if (!dpu_encoder_phys_vid_is_master(phys_enc))
-		return -EINVAL;
-
-	if (!phys_enc->hw_intf || !phys_enc->hw_intf->ops.get_status)
-		return -EINVAL;
-
-	phys_enc->hw_intf->ops.get_status(phys_enc->hw_intf, &s);
-
-	if (s.is_prog_fetch_en && s.is_en) {
-		fetch_start = mode.vtotal - (mode.vsync_start - mode.vdisplay);
-		if ((s.line_count > fetch_start) &&
-			(s.line_count <= mode.vtotal))
-			return s.frame_count + 1;
-	}
-
-	return s.frame_count;
+	spin_lock_irqsave(&vid->counter_lock, flags);
+	count = dpu_encoder_phys_vid_counter_update(phys_enc, false);
+	spin_unlock_irqrestore(&vid->counter_lock, flags);
+	return count;
 }
 
 static void dpu_encoder_phys_vid_init_ops(struct dpu_encoder_phys_ops *ops)
@@ -763,19 +887,22 @@ static void dpu_encoder_phys_vid_init_ops(struct dpu_encoder_phys_ops *ops)
 struct dpu_encoder_phys *dpu_encoder_phys_vid_init(struct drm_device *dev,
 		struct dpu_enc_phys_init_params *p)
 {
-	struct dpu_encoder_phys *phys_enc = NULL;
+	struct dpu_encoder_phys *phys_enc;
+	struct dpu_encoder_phys_vid *vid;
 
 	if (!p) {
 		DPU_ERROR("failed to create encoder due to invalid parameter\n");
 		return ERR_PTR(-EINVAL);
 	}
 
-	phys_enc = drmm_kzalloc(dev, sizeof(*phys_enc), GFP_KERNEL);
-	if (!phys_enc) {
+	vid = drmm_kzalloc(dev, sizeof(*vid), GFP_KERNEL);
+	if (!vid) {
 		DPU_ERROR("failed to create encoder due to memory allocation error\n");
 		return ERR_PTR(-ENOMEM);
 	}
 
+	phys_enc = &vid->base;
+	spin_lock_init(&vid->counter_lock);
 	DPU_DEBUG_VIDENC(phys_enc, "\n");
 
 	dpu_encoder_phys_init(phys_enc, p);

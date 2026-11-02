@@ -57,6 +57,9 @@ struct dpu_core_perf {
 u64 dpu_core_perf_adjusted_mode_clk(u64 clk_rate,
 				    const struct dpu_perf_cfg *perf_cfg);
 
+u64 dpu_core_perf_mode_clk(const struct drm_display_mode *mode,
+			 unsigned int num_mixers, bool dsc);
+
 int dpu_core_perf_crtc_check(struct drm_crtc *crtc,
 		struct drm_crtc_state *state);
 

@@ -112,8 +112,8 @@ struct dpu_encoder_phys_ops {
 	void (*prepare_idle_pc)(struct dpu_encoder_phys *phys_enc);
 	void (*restore)(struct dpu_encoder_phys *phys);
 	int (*get_line_count)(struct dpu_encoder_phys *phys);
-	int (*get_frame_count)(struct dpu_encoder_phys *phys);
-	void (*prepare_wb_job)(struct dpu_encoder_phys *phys_enc,
+	u32 (*get_frame_count)(struct dpu_encoder_phys *phys);
+	int (*prepare_wb_job)(struct dpu_encoder_phys *phys_enc,
 			struct drm_writeback_job *job);
 	void (*cleanup_wb_job)(struct dpu_encoder_phys *phys_enc,
 			struct drm_writeback_job *job);

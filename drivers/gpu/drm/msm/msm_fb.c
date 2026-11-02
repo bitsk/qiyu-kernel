@@ -4,6 +4,8 @@
  * Author: Rob Clark <robdclark@gmail.com>
  */
 
+#include <linux/mutex.h>
+
 #include <drm/drm_crtc.h>
 #include <drm/drm_damage_helper.h>
 #include <drm/drm_fourcc.h>
@@ -24,7 +26,9 @@ struct msm_framebuffer {
 
 	/* Framebuffer per-plane address, if pinned, else zero: */
 	uint64_t iova[DRM_FORMAT_MAX_PLANES];
-	atomic_t prepare_count;
+	/* Serialize first pin and last unpin against asynchronous cleanup. */
+	struct mutex prepare_lock;
+	unsigned int prepare_count;
 };
 #define to_msm_framebuffer(x) container_of(x, struct msm_framebuffer, base)
 
@@ -76,24 +80,44 @@ int msm_framebuffer_prepare(struct drm_framebuffer *fb, bool needs_dirtyfb)
 	struct msm_drm_private *priv = fb->dev->dev_private;
 	struct drm_gpuvm *vm = priv->kms->vm;
 	struct msm_framebuffer *msm_fb = to_msm_framebuffer(fb);
-	int ret, i, n = fb->format->num_planes;
+	int ret = 0, i, n = fb->format->num_planes;
 
-	if (needs_dirtyfb)
-		refcount_inc(&msm_fb->dirtyfb);
-
-	if (atomic_inc_return(&msm_fb->prepare_count) > 1)
-		return 0;
+	/*
+	 * A new commit prepares synchronously while an old commit can clean up
+	 * in its worker. The count alone does not protect the zero-to-one pin
+	 * from the previous one-to-zero unpin clearing the newly published IOVA.
+	 */
+	mutex_lock(&msm_fb->prepare_lock);
+	if (msm_fb->prepare_count++)
+		goto out;
 
 	for (i = 0; i < n; i++) {
 		msm_gem_vma_get(fb->obj[i]);
 		ret = msm_gem_get_and_pin_iova(fb->obj[i], vm, &msm_fb->iova[i]);
 		drm_dbg_state(fb->dev, "FB[%u]: iova[%d]: %08llx (%d)\n",
 			      fb->base.id, i, msm_fb->iova[i], ret);
-		if (ret)
-			return ret;
+		if (ret) {
+			msm_gem_vma_put(fb->obj[i]);
+			goto fail;
+		}
 	}
 
+out:
+	if (needs_dirtyfb)
+		refcount_inc(&msm_fb->dirtyfb);
+	mutex_unlock(&msm_fb->prepare_lock);
 	return 0;
+
+fail:
+	/* The atomic helper cleans only earlier successfully prepared planes. */
+	while (i--) {
+		msm_gem_unpin_iova(fb->obj[i], vm);
+		msm_gem_vma_put(fb->obj[i]);
+	}
+	memset(msm_fb->iova, 0, sizeof(msm_fb->iova));
+	msm_fb->prepare_count = 0;
+	mutex_unlock(&msm_fb->prepare_lock);
+	return ret;
 }
 
 void msm_framebuffer_cleanup(struct drm_framebuffer *fb, bool needed_dirtyfb)
@@ -103,11 +127,12 @@ void msm_framebuffer_cleanup(struct drm_framebuffer *fb, bool needed_dirtyfb)
 	struct msm_framebuffer *msm_fb = to_msm_framebuffer(fb);
 	int i, n = fb->format->num_planes;
 
+	mutex_lock(&msm_fb->prepare_lock);
 	if (needed_dirtyfb)
 		refcount_dec(&msm_fb->dirtyfb);
 
-	if (atomic_dec_return(&msm_fb->prepare_count))
-		return;
+	if (--msm_fb->prepare_count)
+		goto out;
 
 	memset(msm_fb->iova, 0, sizeof(msm_fb->iova));
 
@@ -115,6 +140,8 @@ void msm_framebuffer_cleanup(struct drm_framebuffer *fb, bool needed_dirtyfb)
 		msm_gem_unpin_iova(fb->obj[i], vm);
 		msm_gem_vma_put(fb->obj[i]);
 	}
+out:
+	mutex_unlock(&msm_fb->prepare_lock);
 }
 
 uint32_t msm_framebuffer_iova(struct drm_framebuffer *fb, int plane)
@@ -169,6 +196,7 @@ msm_framebuffer_init(struct drm_device *dev, const struct drm_format_info *info,
 	fb = &msm_fb->base;
 
 	msm_fb->format = format;
+	mutex_init(&msm_fb->prepare_lock);
 
 	if (n > ARRAY_SIZE(fb->obj)) {
 		ret = -EINVAL;

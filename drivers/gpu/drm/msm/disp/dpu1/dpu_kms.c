@@ -1035,6 +1035,24 @@ static void dpu_kms_mdp_snapshot(struct msm_disp_state *disp_state, struct msm_k
 		msm_disp_snapshot_add_block(disp_state, cat->cwb[i].len,
 					    dpu_kms->mmio + cat->cwb[i].base, cat->cwb[i].name);
 
+	if (cat->mdss_ver->core_major_ver == 6 &&
+	    cat->mdss_ver->core_minor_ver == 0 && cat->dsc_count == 4) {
+		unsigned int sample, dsc;
+
+		msm_disp_snapshot_add_block(disp_state, 0x10,
+			dpu_kms->mmio + cat->dsc[0].base + 0x1800, "dsc_mux");
+		for (sample = 0; sample < 16; sample++) {
+			u32 line = readl_relaxed(dpu_kms->mmio +
+				cat->intf[1].base + 0xb0);
+
+			for (dsc = 0; dsc < 2; dsc++)
+				msm_disp_snapshot_add_block(disp_state, 0xc,
+					dpu_kms->mmio + cat->dsc[dsc].base + 0x128,
+					"dsc%u_sample%u_line%u", dsc, sample, line);
+			usleep_range(1000, 1100);
+		}
+	}
+
 	/* dump DSC sub-blocks HW regs info */
 	for (i = 0; i < cat->dsc_count; i++) {
 		base = dpu_kms->mmio + cat->dsc[i].base;

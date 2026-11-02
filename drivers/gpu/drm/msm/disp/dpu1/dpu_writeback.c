@@ -97,9 +97,7 @@ static int dpu_wb_conn_prepare_job(struct drm_writeback_connector *connector,
 	if (!job->fb)
 		return 0;
 
-	dpu_encoder_prepare_wb_job(dpu_wb_conn->wb_enc, job);
-
-	return 0;
+	return dpu_encoder_prepare_wb_job(dpu_wb_conn->wb_enc, job);
 }
 
 static void dpu_wb_conn_cleanup_job(struct drm_writeback_connector *connector,

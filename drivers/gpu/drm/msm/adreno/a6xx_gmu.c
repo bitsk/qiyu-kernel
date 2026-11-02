@@ -164,6 +164,15 @@ void a6xx_gmu_set_freq(struct msm_gpu *gpu, struct dev_pm_opp *opp,
 	unsigned long gpu_freq;
 	int ret = 0;
 
+	/*
+	 * Registering the devfreq cooling device can immediately request a
+	 * frequency change, before a6xx_gmu_init() has built the GMU table.
+	 * Do not underflow nr_gpu_freqs - 1 while the GPU is still unprobed.
+	 * The devfreq QoS limit remains in effect when monitoring resumes.
+	 */
+	if (!gmu->nr_gpu_freqs)
+		return;
+
 	gpu_freq = dev_pm_opp_get_freq(opp);
 
 	if (gpu_freq == gmu->freq)

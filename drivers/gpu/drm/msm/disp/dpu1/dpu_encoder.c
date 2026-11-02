@@ -533,11 +533,15 @@ int dpu_encoder_helper_wait_for_irq(struct dpu_encoder_phys *phys_enc,
  * dpu_encoder_get_vsync_count - get vsync count for the encoder.
  * @drm_enc:    Pointer to previously created drm encoder structure
  */
-int dpu_encoder_get_vsync_count(struct drm_encoder *drm_enc)
+u32 dpu_encoder_get_vsync_count(struct drm_encoder *drm_enc)
 {
 	struct dpu_encoder_virt *dpu_enc = to_dpu_encoder_virt(drm_enc);
 	struct dpu_encoder_phys *phys = dpu_enc ? dpu_enc->cur_master : NULL;
-	return phys ? atomic_read(&phys->vsync_cnt) : 0;
+	if (!phys)
+		return 0;
+	if (phys->intf_mode == INTF_MODE_VIDEO && phys->ops.get_frame_count)
+		return phys->ops.get_frame_count(phys);
+	return atomic_read(&phys->vsync_cnt);
 }
 
 /**
@@ -1109,21 +1113,31 @@ static int dpu_encoder_resource_control(struct drm_encoder *drm_enc,
  * @drm_enc:    Pointer to previously created drm encoder structure
  * @job:        Pointer to the current drm writeback job
  */
-void dpu_encoder_prepare_wb_job(struct drm_encoder *drm_enc,
+int dpu_encoder_prepare_wb_job(struct drm_encoder *drm_enc,
 		struct drm_writeback_job *job)
 {
-	struct dpu_encoder_virt *dpu_enc;
-	int i;
-
-	dpu_enc = to_dpu_encoder_virt(drm_enc);
+	struct dpu_encoder_virt *dpu_enc = to_dpu_encoder_virt(drm_enc);
+	int i, ret;
 
 	for (i = 0; i < dpu_enc->num_phys_encs; i++) {
 		struct dpu_encoder_phys *phys = dpu_enc->phys_encs[i];
 
-		if (phys->ops.prepare_wb_job)
-			phys->ops.prepare_wb_job(phys, job);
-
+		if (phys->ops.prepare_wb_job) {
+			ret = phys->ops.prepare_wb_job(phys, job);
+			if (ret)
+				goto fail;
+		}
 	}
+	return 0;
+
+fail:
+	while (i--) {
+		struct dpu_encoder_phys *phys = dpu_enc->phys_encs[i];
+
+		if (phys->ops.prepare_wb_job && phys->ops.cleanup_wb_job)
+			phys->ops.cleanup_wb_job(phys, job);
+	}
+	return ret;
 }
 
 /**

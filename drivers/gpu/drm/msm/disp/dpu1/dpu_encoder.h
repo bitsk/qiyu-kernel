@@ -68,7 +68,7 @@ struct drm_encoder *dpu_encoder_init(struct drm_device *dev,
 
 int dpu_encoder_get_linecount(struct drm_encoder *drm_enc);
 
-int dpu_encoder_get_vsync_count(struct drm_encoder *drm_enc);
+u32 dpu_encoder_get_vsync_count(struct drm_encoder *drm_enc);
 
 bool dpu_encoder_is_widebus_enabled(const struct drm_encoder *drm_enc);
 
@@ -89,7 +89,7 @@ void dpu_encoder_update_topology(struct drm_encoder *drm_enc,
 
 bool dpu_encoder_needs_modeset(struct drm_encoder *drm_enc, struct drm_atomic_commit *state);
 
-void dpu_encoder_prepare_wb_job(struct drm_encoder *drm_enc,
+int dpu_encoder_prepare_wb_job(struct drm_encoder *drm_enc,
 		struct drm_writeback_job *job);
 
 void dpu_encoder_cleanup_wb_job(struct drm_encoder *drm_enc,

@@ -556,7 +556,7 @@ static void dpu_encoder_phys_wb_disable(struct dpu_encoder_phys *phys_enc)
 	phys_enc->enable_state = DPU_ENC_DISABLED;
 }
 
-static void dpu_encoder_phys_wb_prepare_wb_job(struct dpu_encoder_phys *phys_enc,
+static int dpu_encoder_phys_wb_prepare_wb_job(struct dpu_encoder_phys *phys_enc,
 		struct drm_writeback_job *job)
 {
 	const struct msm_format *format;
@@ -565,10 +565,7 @@ static void dpu_encoder_phys_wb_prepare_wb_job(struct dpu_encoder_phys *phys_enc
 	struct dpu_encoder_phys_wb *wb_enc = to_dpu_encoder_phys_wb(phys_enc);
 
 	if (!job->fb)
-		return;
-
-	wb_enc->wb_job = job;
-	wb_enc->wb_conn = job->connector;
+		return 0;
 
 	wb_cfg = &wb_enc->wb_cfg;
 
@@ -577,7 +574,7 @@ static void dpu_encoder_phys_wb_prepare_wb_job(struct dpu_encoder_phys *phys_enc
 	ret = msm_framebuffer_prepare(job->fb, false);
 	if (ret) {
 		DPU_ERROR("prep fb failed, %d\n", ret);
-		return;
+		return ret;
 	}
 
 	format = msm_framebuffer_format(job->fb);
@@ -585,7 +582,8 @@ static void dpu_encoder_phys_wb_prepare_wb_job(struct dpu_encoder_phys *phys_enc
 	ret = dpu_format_populate_plane_sizes(job->fb, &wb_cfg->dest);
 	if (ret) {
 		DPU_DEBUG("failed to populate plane sizes%d\n", ret);
-		return;
+		msm_framebuffer_cleanup(job->fb, false);
+		return ret;
 	}
 
 	dpu_format_populate_addrs(job->fb, &wb_cfg->dest);
@@ -605,6 +603,10 @@ static void dpu_encoder_phys_wb_prepare_wb_job(struct dpu_encoder_phys *phys_enc
 	DPU_DEBUG("[fb_stride:%8.8x,%8.8x,%8.8x,%8.8x]\n",
 			wb_cfg->dest.plane_pitch[0], wb_cfg->dest.plane_pitch[1],
 			wb_cfg->dest.plane_pitch[2], wb_cfg->dest.plane_pitch[3]);
+
+	wb_enc->wb_job = job;
+	wb_enc->wb_conn = job->connector;
+	return 0;
 }
 
 static void dpu_encoder_phys_wb_cleanup_wb_job(struct dpu_encoder_phys *phys_enc,

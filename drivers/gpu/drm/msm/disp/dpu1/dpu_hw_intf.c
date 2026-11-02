@@ -335,12 +335,25 @@ static void dpu_hw_intf_get_status(
 		s->is_en = DPU_REG_READ(c, INTF_TIMING_ENGINE_EN);
 
 	s->is_prog_fetch_en = !!(DPU_REG_READ(c, INTF_CONFIG) & BIT(31));
+	s->line_count = 0;
+	s->frame_count = 0;
 	if (s->is_en) {
-		s->frame_count = DPU_REG_READ(c, INTF_FRAME_COUNT);
-		s->line_count = DPU_REG_READ(c, INTF_LINE_COUNT);
-	} else {
-		s->line_count = 0;
-		s->frame_count = 0;
+		u32 frame, line;
+		int i;
+
+		/* A frame rollover between the two reads must not combine an
+		 * old frame with a new line (or vice versa). Zero line denotes
+		 * no consistent running sample to the video counter callback.
+		 */
+		for (i = 0; i < 3; i++) {
+			frame = DPU_REG_READ(c, INTF_FRAME_COUNT);
+			line = DPU_REG_READ(c, INTF_LINE_COUNT);
+			if (frame != DPU_REG_READ(c, INTF_FRAME_COUNT))
+				continue;
+			s->frame_count = frame;
+			s->line_count = line;
+			break;
+		}
 	}
 }
 

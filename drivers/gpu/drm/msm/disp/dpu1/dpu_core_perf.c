@@ -11,6 +11,8 @@
 #include <linux/sort.h>
 #include <linux/clk.h>
 #include <linux/bitmap.h>
+#include <linux/overflow.h>
+#include <drm/drm_atomic_helper.h>
 
 #include "dpu_kms.h"
 #include "dpu_trace.h"
@@ -51,25 +53,50 @@ u64 dpu_core_perf_adjusted_mode_clk(u64 mode_clk_rate,
 	return mode_clk_rate;
 }
 
+/*
+ * Per-mixer input rate. DSC buffers active pixels; its link blanking is
+ * generated downstream and is not uncompressed mixer work. Non-DSC paths
+ * retain the full pixel rate. The caller must check the actual topology
+ * in atomic_check; mode_valid can only test hardware-wide possibilities.
+ */
+u64 dpu_core_perf_mode_clk(const struct drm_display_mode *mode,
+                         unsigned int num_mixers, bool dsc)
+{
+	u64 rate;
+
+	if (!num_mixers || mode->clock <= 0 || mode->hdisplay <= 0 ||
+	    mode->htotal < mode->hdisplay)
+		return U64_MAX;
+
+	rate = (u64)mode->clock * 1000;
+	if (dsc) {
+		if (check_mul_overflow(rate, (u64)mode->hdisplay, &rate))
+			return U64_MAX;
+		rate = DIV_ROUND_UP_ULL(rate, mode->htotal);
+	}
+
+	return DIV_ROUND_UP_ULL(rate, num_mixers);
+}
+
 /**
  * _dpu_core_perf_calc_bw() - to calculate BW per crtc
  * @perf_cfg: performance configuration
- * @crtc: pointer to a crtc
+ * @state: incoming crtc state
  * Return: returns aggregated BW for all planes in crtc.
  */
 static u64 _dpu_core_perf_calc_bw(const struct dpu_perf_cfg *perf_cfg,
-		struct drm_crtc *crtc)
+		struct drm_crtc_state *state)
 {
 	struct drm_plane *plane;
-	struct dpu_plane_state *pstate;
+	const struct drm_plane_state *plane_state;
+	const struct dpu_plane_state *pstate;
 	u64 crtc_plane_bw = 0;
 	u32 bw_factor;
 
-	drm_atomic_crtc_for_each_plane(plane, crtc) {
-		pstate = to_dpu_plane_state(plane->state);
-		if (!pstate)
+	drm_atomic_crtc_state_for_each_plane_state(plane, plane_state, state) {
+		if (!plane_state->visible)
 			continue;
-
+		pstate = to_dpu_plane_state(plane_state);
 		crtc_plane_bw += pstate->plane_fetch_bw;
 	}
 
@@ -85,27 +112,29 @@ static u64 _dpu_core_perf_calc_bw(const struct dpu_perf_cfg *perf_cfg,
 /**
  * _dpu_core_perf_calc_clk() - to calculate clock per crtc
  * @perf_cfg: performance configuration
- * @crtc: pointer to a crtc
- * @state: pointer to a crtc state
+ * @state: incoming crtc state
  * Return: returns max clk for all planes in crtc.
  */
 static u64 _dpu_core_perf_calc_clk(const struct dpu_perf_cfg *perf_cfg,
-		struct drm_crtc *crtc, struct drm_crtc_state *state)
+		struct drm_crtc_state *state)
 {
 	struct drm_plane *plane;
-	struct dpu_plane_state *pstate;
+	const struct drm_plane_state *plane_state;
+	const struct dpu_plane_state *pstate;
 	struct drm_display_mode *mode;
 	u64 mode_clk;
 
 	mode = &state->adjusted_mode;
 
-	mode_clk = (u64)mode->vtotal * mode->hdisplay * drm_mode_vrefresh(mode);
+	mode_clk = dpu_core_perf_mode_clk(mode, dpu_crtc_get_num_lm(state),
+					   dpu_crtc_has_dsc(state));
+	if (mode_clk == U64_MAX)
+		return U64_MAX;
 
-	drm_atomic_crtc_for_each_plane(plane, crtc) {
-		pstate = to_dpu_plane_state(plane->state);
-		if (!pstate)
+	drm_atomic_crtc_state_for_each_plane_state(plane, plane_state, state) {
+		if (!plane_state->visible)
 			continue;
-
+		pstate = to_dpu_plane_state(plane_state);
 		mode_clk = max(pstate->plane_clk, mode_clk);
 	}
 
@@ -131,9 +160,9 @@ static void _dpu_core_perf_calc_crtc(const struct dpu_core_perf *core_perf,
 		return;
 	}
 
-	perf->bw_ctl = _dpu_core_perf_calc_bw(perf_cfg, crtc);
+	perf->bw_ctl = _dpu_core_perf_calc_bw(perf_cfg, state);
 	perf->max_per_pipe_ib = perf_cfg->min_dram_ib;
-	perf->core_clk_rate = _dpu_core_perf_calc_clk(perf_cfg, crtc, state);
+	perf->core_clk_rate = _dpu_core_perf_calc_clk(perf_cfg, state);
 	DRM_DEBUG_ATOMIC(
 		"crtc=%d clk_rate=%llu core_ib=%u core_ab=%u\n",
 			crtc->base.id, perf->core_clk_rate,
@@ -195,7 +224,20 @@ int dpu_core_perf_crtc_check(struct drm_crtc *crtc,
 	/* obtain new values */
 	_dpu_core_perf_calc_crtc(&kms->perf, crtc, state, &dpu_cstate->new_perf);
 
+	DRM_DEBUG_DRIVER("DPU_CLOCK_PLAN mixers=%u dsc=%u clk=%llu max=%llu bw=%llu refs=%d\n",
+		dpu_crtc_get_num_lm(state), dpu_crtc_has_dsc(state),
+		dpu_cstate->new_perf.core_clk_rate, kms->perf.max_core_clk_rate,
+		dpu_cstate->new_perf.bw_ctl, atomic_read(&kms->bandwidth_ref));
+	if (dpu_cstate->new_perf.core_clk_rate > kms->perf.max_core_clk_rate)
+		return -E2BIG;
+
 	dpu_core_perf_aggregate(crtc->dev, dpu_crtc_get_client_type(crtc), &perf);
+	/* Replace this CRTC's old contribution with the incoming demand.
+	 * Other active CRTCs retain the existing conservative aggregation.
+	 */
+	if (crtc->enabled)
+		perf.bw_ctl -= to_dpu_crtc_state(crtc->state)->new_perf.bw_ctl;
+	perf.bw_ctl += dpu_cstate->new_perf.bw_ctl;
 
 	/* convert bandwidth to kb */
 	bw = DIV_ROUND_UP_ULL(perf.bw_ctl, 1000);
@@ -406,6 +448,8 @@ int dpu_core_perf_crtc_update(struct drm_crtc *crtc,
 		}
 
 		kms->perf.core_clk_rate = clk_rate;
+		DRM_DEBUG_DRIVER("DPU_CLOCK_APPLY request=%llu ccf_rate=%lu\n",
+			clk_rate, dpu_kms_get_clk_rate(kms, "core"));
 		DRM_DEBUG_ATOMIC("update clk rate = %lld HZ\n", clk_rate);
 	}
 	return 0;
@@ -472,6 +516,8 @@ int dpu_core_perf_debugfs_init(struct dpu_kms *dpu_kms, struct dentry *parent)
 	struct dentry *entry;
 
 	entry = debugfs_create_dir("core_perf", parent);
+	debugfs_create_atomic_t("bandwidth_ref", 0400, entry,
+				&dpu_kms->bandwidth_ref);
 
 	debugfs_create_u64("max_core_clk_rate", 0600, entry,
 			&perf->max_core_clk_rate);

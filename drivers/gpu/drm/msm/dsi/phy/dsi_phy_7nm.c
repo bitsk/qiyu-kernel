@@ -96,6 +96,8 @@ struct dsi_pll_7nm {
 	 */
 	spinlock_t pll_enable_lock;
 	int pll_enable_cnt;
+	/* Preserve a digital domain already powered by PHY/boot firmware. */
+	bool bias_digtop_owned;
 
 	struct pll_7nm_cached_state cached_state;
 
@@ -414,6 +416,9 @@ static void dsi_pll_disable_pll_bias(struct dsi_pll_7nm *pll)
 
 	data = readl(pll->phy->base + REG_DSI_7nm_PHY_CMN_CTRL_0);
 	data &= ~DSI_7nm_PHY_CMN_CTRL_0_PLL_SHUTDOWNB;
+	if (pll->bias_digtop_owned)
+		data &= ~DSI_7nm_PHY_CMN_CTRL_0_DIGTOP_PWRDN_B;
+	pll->bias_digtop_owned = false;
 	writel(0, pll->phy->pll_base + REG_DSI_7nm_PHY_PLL_SYSTEM_MUXES);
 	writel(data, pll->phy->base + REG_DSI_7nm_PHY_CMN_CTRL_0);
 	spin_unlock_irqrestore(&pll->pll_enable_lock, flags);
@@ -433,7 +438,9 @@ static void dsi_pll_enable_pll_bias(struct dsi_pll_7nm *pll)
 	}
 
 	data = readl(pll->phy->base + REG_DSI_7nm_PHY_CMN_CTRL_0);
-	data |= DSI_7nm_PHY_CMN_CTRL_0_PLL_SHUTDOWNB;
+	pll->bias_digtop_owned = !(data & DSI_7nm_PHY_CMN_CTRL_0_DIGTOP_PWRDN_B);
+	data |= DSI_7nm_PHY_CMN_CTRL_0_PLL_SHUTDOWNB |
+		DSI_7nm_PHY_CMN_CTRL_0_DIGTOP_PWRDN_B;
 	writel(data, pll->phy->base + REG_DSI_7nm_PHY_CMN_CTRL_0);
 
 	writel(0xc0, pll->phy->pll_base + REG_DSI_7nm_PHY_PLL_SYSTEM_MUXES);
@@ -491,11 +498,26 @@ static void dsi_pll_phy_dig_reset(struct dsi_pll_7nm *pll)
 	wmb(); /* Ensure that the reset is deasserted */
 }
 
+/* Bringup diagnostics: these are ordinary configuration/status reads. */
+static void dsi_pll_7nm_trace(struct dsi_pll_7nm *pll, const char *phase, int rc)
+{
+	pr_info("DSI7_TRACE phase=%s id=%d usecase=%d rate=%llu bias=%d ctrl0=%08x cfg0=%08x cfg1=%08x pllctl=%08x mux=%08x status=%08x rc=%d\n",
+		phase, pll->phy->id, pll->phy->usecase, pll->vco_current_rate,
+		pll->pll_enable_cnt,
+		readl(pll->phy->base + REG_DSI_7nm_PHY_CMN_CTRL_0),
+		readl(pll->phy->base + REG_DSI_7nm_PHY_CMN_CLK_CFG0),
+		readl(pll->phy->base + REG_DSI_7nm_PHY_CMN_CLK_CFG1),
+		readl(pll->phy->base + REG_DSI_7nm_PHY_CMN_PLL_CNTRL),
+		readl(pll->phy->pll_base + REG_DSI_7nm_PHY_PLL_SYSTEM_MUXES),
+		readl(pll->phy->pll_base + REG_DSI_7nm_PHY_PLL_COMMON_STATUS_ONE), rc);
+}
+
 static int dsi_pll_7nm_vco_prepare(struct clk_hw *hw)
 {
 	struct dsi_pll_7nm *pll_7nm = to_pll_7nm(hw);
 	int rc;
 
+	dsi_pll_7nm_trace(pll_7nm, "before-prepare", 0);
 	dsi_pll_enable_pll_bias(pll_7nm);
 	if (pll_7nm->slave)
 		dsi_pll_enable_pll_bias(pll_7nm->slave);
@@ -511,8 +533,15 @@ static int dsi_pll_7nm_vco_prepare(struct clk_hw *hw)
 
 	/* Check for PLL lock */
 	rc = dsi_pll_7nm_lock_status(pll_7nm);
+	dsi_pll_7nm_trace(pll_7nm, "lock-result", rc);
 	if (rc) {
 		pr_err("PLL(%d) lock failed\n", pll_7nm->phy->id);
+		/* Failed prepare has no matching clk_ops.unprepare callback. */
+		writel(0, pll_7nm->phy->base + REG_DSI_7nm_PHY_CMN_PLL_CNTRL);
+		dsi_pll_disable_pll_bias(pll_7nm);
+		if (pll_7nm->slave)
+			dsi_pll_disable_pll_bias(pll_7nm->slave);
+		dsi_pll_7nm_trace(pll_7nm, "prepare-cleanup", rc);
 		goto error;
 	}
 
@@ -564,6 +593,7 @@ static void dsi_pll_7nm_vco_unprepare(struct clk_hw *hw)
 	/* flush, ensure all register writes are done */
 	wmb();
 	pll_7nm->phy->pll_on = false;
+	dsi_pll_7nm_trace(pll_7nm, "after-unprepare", 0);
 }
 
 static unsigned long dsi_pll_7nm_vco_recalc_rate(struct clk_hw *hw,
@@ -1092,10 +1122,16 @@ static int dsi_7nm_phy_enable(struct msm_dsi_phy *phy,
 
 	spin_lock_irqsave(&pll->pll_enable_lock, flags);
 	pll->pll_enable_cnt = 1;
+	/* The enabled PHY now owns the digital domain. */
+	pll->bias_digtop_owned = false;
 	/* de-assert digital and pll power down */
 	data = DSI_7nm_PHY_CMN_CTRL_0_DIGTOP_PWRDN_B |
 	       DSI_7nm_PHY_CMN_CTRL_0_PLL_SHUTDOWNB;
 	writel(data, base + REG_DSI_7nm_PHY_CMN_CTRL_0);
+	/* This PHY reference makes enable_pll_bias() skip its
+	 * register writes. Establish the complete bias state here.
+	 */
+	writel(0xc0, phy->pll_base + REG_DSI_7nm_PHY_PLL_SYSTEM_MUXES);
 	spin_unlock_irqrestore(&pll->pll_enable_lock, flags);
 
 	/* Assert PLL core reset */
@@ -1240,6 +1276,9 @@ static void dsi_7nm_phy_disable(struct msm_dsi_phy *phy)
 
 	spin_lock_irqsave(&pll->pll_enable_lock, flags);
 	pll->pll_enable_cnt = 0;
+	pll->bias_digtop_owned = false;
+	/* Drop the PHY's bias reference together with its hardware state. */
+	writel(0, phy->pll_base + REG_DSI_7nm_PHY_PLL_SYSTEM_MUXES);
 	/* Turn off all PHY blocks */
 	writel(0x00, base + REG_DSI_7nm_PHY_CMN_CTRL_0);
 	spin_unlock_irqrestore(&pll->pll_enable_lock, flags);
