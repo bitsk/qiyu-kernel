@@ -205,6 +205,7 @@ static int __pwm_write_waveform(struct pwm_chip *chip, struct pwm_device *pwm, c
 	int ret;
 
 	ret = ops->write_waveform(chip, pwm, wfhw);
+	pwm->state_needs_apply = !!ret;
 	trace_pwm_write_waveform(pwm, wfhw, ret);
 
 	return ret;
@@ -573,6 +574,7 @@ static void pwm_apply_debug(struct pwm_device *pwm,
 
 	/* reapply the state that the driver reported being configured. */
 	err = chip->ops->apply(chip, pwm, &s1);
+	pwm->state_needs_apply = !!err;
 	trace_pwm_apply(pwm, &s1, err);
 	if (err) {
 		*last = s1;
@@ -647,7 +649,9 @@ static int __pwm_apply(struct pwm_device *pwm, const struct pwm_state *state)
 	chip = pwm->chip;
 	ops = chip->ops;
 
-	if (state->period == pwm->state.period &&
+	/* A failed write may have changed hardware without updating .state. */
+	if (!pwm->state_needs_apply &&
+	    state->period == pwm->state.period &&
 	    state->duty_cycle == pwm->state.duty_cycle &&
 	    state->polarity == pwm->state.polarity &&
 	    state->enabled == pwm->state.enabled &&
@@ -705,6 +709,7 @@ static int __pwm_apply(struct pwm_device *pwm, const struct pwm_state *state)
 
 	} else {
 		err = ops->apply(chip, pwm, state);
+		pwm->state_needs_apply = !!err;
 		trace_pwm_apply(pwm, state, err);
 		if (err)
 			return err;

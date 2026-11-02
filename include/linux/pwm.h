@@ -104,6 +104,7 @@ struct pwm_state {
  * @args: PWM arguments
  * @state: last applied state
  * @last: last implemented state (for PWM_DEBUG)
+ * @state_needs_apply: a failed write requires reapplying even an unchanged state
  */
 struct pwm_device {
 	const char *label;
@@ -114,6 +115,7 @@ struct pwm_device {
 	struct pwm_args args;
 	struct pwm_state state;
 	struct pwm_state last;
+	bool state_needs_apply;
 };
 
 /**

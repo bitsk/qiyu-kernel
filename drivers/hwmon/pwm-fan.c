@@ -173,31 +173,31 @@ disable_regulator:
 
 static int pwm_fan_power_off(struct pwm_fan_ctx *ctx, bool force_disable)
 {
-	struct pwm_state *state = &ctx->pwm_state;
+	struct pwm_state state = ctx->pwm_state;
 	bool enable_regulator = false;
 	int ret;
 
-	if (!ctx->enabled)
-		return 0;
-
+	/* Zero duty may still leave the PWM or supply enabled. */
 	pwm_fan_enable_mode_2_state(ctx->enable_mode,
-				    state,
+				    &state,
 				    &enable_regulator);
 
-	if (force_disable)
-		state->enabled = false;
-	state->duty_cycle = 0;
-	ret = pwm_apply_might_sleep(ctx->pwm, state);
+	if (force_disable) {
+		state.enabled = false;
+		enable_regulator = false;
+	}
+	state.duty_cycle = 0;
+	ret = pwm_apply_might_sleep(ctx->pwm, &state);
 	if (ret) {
 		dev_err(ctx->dev, "failed to disable PWM\n");
 		return ret;
 	}
 
-	pwm_fan_switch_power(ctx, enable_regulator);
-
+	ctx->pwm_state = state;
 	ctx->enabled = false;
 
-	return 0;
+	/* Keep failures visible and allow a later zero-duty retry. */
+	return pwm_fan_switch_power(ctx, enable_regulator);
 }
 
 static int  __set_pwm(struct pwm_fan_ctx *ctx, unsigned long pwm)
@@ -717,8 +717,20 @@ static void pwm_fan_shutdown(struct platform_device *pdev)
 static int pwm_fan_suspend(struct device *dev)
 {
 	struct pwm_fan_ctx *ctx = dev_get_drvdata(dev);
+	int ret, restore_ret;
 
-	return pwm_fan_power_off(ctx, true);
+	mutex_lock(&ctx->lock);
+	ret = pwm_fan_power_off(ctx, true);
+	if (ret) {
+		/* The PM core need not resume a device whose suspend failed. */
+		restore_ret = __set_pwm(ctx, ctx->pwm_value);
+		if (restore_ret)
+			dev_err(dev, "failed to restore PWM after suspend failure: %d\n",
+				restore_ret);
+	}
+	mutex_unlock(&ctx->lock);
+
+	return ret;
 }
 
 static int pwm_fan_resume(struct device *dev)
