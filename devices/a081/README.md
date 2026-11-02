@@ -7,7 +7,6 @@ Qualcomm SM8250 板级适配，内核版本 `7.3.0-qiyu-mix`。驱动源码冻�
 | 内核配置 | [config/kernel.config](config/kernel.config) |
 | 累计补丁 | [patches/a081-v7.3.patch](patches/a081-v7.3.patch)，已应用 |
 | 发布清单 | [manifest.json](manifest.json) |
-| 原始构建与实机证据 | [provenance](provenance/) |
 | 温控工具 | [thermal](thermal/) |
 
 ## 构建
@@ -20,7 +19,7 @@ Debian/Ubuntu 主机需 GNU make、GCC arm64 交叉工具链、binutils、bc、b
 ./devices/a081/build.sh /absolute/path/to/new-output
 ```
 
-脚本仅接受源码树之外的新目录，生成 Image、源 DTB、配置与模块包，不访问设备。模块安装路径为 `lib/modules/7.3.0-qiyu-mix`，必须与相同版本的内核配套。设备树检查使用内核标准 dt_binding_check / dtbs_check，需 dtschema；原始通过日志保存在 provenance。版本后缀修改不涉及驱动、DTS 或 binding。
+脚本仅接受源码树之外的新目录，生成 Image、源 DTB、配置与模块包，不访问设备。模块安装路径为 `lib/modules/7.3.0-qiyu-mix`，必须与相同版本的内核配套。设备树检查使用内核标准 dt_binding_check / dtbs_check，需 dtschema。版本后缀修改不涉及驱动、DTS 或 binding。
 
 ## 适配与验收范围
 

@@ -27,4 +27,4 @@ git rebase --onto upstream/master c03c1a14507dfaf8b856c2608f9ac216021fc222 main
 
 更新主线后，重新生成配置，更新构建脚本的内核版本断言，完成内核/模块/initramfs 构建、涉及的 DT schema 检查和启动镜像封装；实机验收前不晋升设备基线。仅更新 Git 历史或离线构建不能代替设备功能验收。
 
-`patches/a081-v7.3.patch` 是初始 7.3 基底的累计补丁归档，今后维护以独立 Git 提交为准。`provenance/` 保存历史事实，其中的旧版本名称和摘要不随 Git 历史重排而改写。
+`patches/a081-v7.3.patch` 是初始 7.3 基底的累计补丁归档，今后维护以独立 Git 提交为准。
