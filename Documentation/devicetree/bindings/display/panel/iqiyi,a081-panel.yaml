@@ -1,0 +1,117 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/display/panel/iqiyi,a081-panel.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: iQIYI Qiyu MIX A081 dual DSI display assembly
+
+maintainers:
+  - Qiyu Project <qiyu@example.invalid>
+
+description: |
+  The BID-08 display assembly uses two four-lane DSI links and DSC for a
+  1920 by 3664 video-mode panel. The compatible identifies this board
+  assembly; the vendor strings in the original firmware do not reliably
+  identify the physical panel manufacturer. Port 0 is the primary link.
+  Board control GPIOs follow the BID-08 sequence, including high levels
+  on the boost and LED controls during normal shutdown.
+
+allOf:
+  - $ref: panel-common-dual.yaml#
+
+properties:
+  compatible:
+    const: iqiyi,a081-panel
+  reg:
+    maxItems: 1
+  vddio-supply:
+    description: Panel 1.8 V I/O supply
+  vsp-supply:
+    description: Positive LCD bias supply
+  vsn-supply:
+    description: Negative LCD bias supply
+  reset-gpios:
+    maxItems: 1
+    description: Active-low panel reset
+  boost-gpios:
+    maxItems: 1
+    description: Board 5 V boost control
+  io-enable-gpios:
+    maxItems: 1
+    description: Board display 1.8 V enable control
+  led-5v-gpios:
+    maxItems: 1
+    description: LED 5 V control
+  led1-gpios:
+    maxItems: 1
+    description: First LED driver control
+  led2-gpios:
+    maxItems: 1
+    description: Second LED driver control
+  pinctrl-names:
+    items:
+      - const: active
+      - const: sleep
+  pinctrl-0: true
+  pinctrl-1: true
+  ports:
+    required:
+      - port@0
+      - port@1
+
+required:
+  - compatible
+  - reg
+  - vddio-supply
+  - vsp-supply
+  - vsn-supply
+  - reset-gpios
+  - boost-gpios
+  - io-enable-gpios
+  - led-5v-gpios
+  - led1-gpios
+  - led2-gpios
+  - pinctrl-names
+  - pinctrl-0
+  - pinctrl-1
+  - ports
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/gpio/gpio.h>
+    dsi {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        panel@0 {
+            compatible = "iqiyi,a081-panel";
+            reg = <0>;
+            vddio-supply = <&vddio>;
+            vsp-supply = <&lcdb_ldo>;
+            vsn-supply = <&lcdb_ncp>;
+            reset-gpios = <&tlmm 75 GPIO_ACTIVE_LOW>;
+            boost-gpios = <&tlmm 3 GPIO_ACTIVE_HIGH>;
+            io-enable-gpios = <&tlmm 140 GPIO_ACTIVE_HIGH>;
+            led-5v-gpios = <&tlmm 134 GPIO_ACTIVE_HIGH>;
+            led1-gpios = <&tlmm 0 GPIO_ACTIVE_HIGH>;
+            led2-gpios = <&tlmm 1 GPIO_ACTIVE_HIGH>;
+            pinctrl-names = "active", "sleep";
+            pinctrl-0 = <&panel_active>;
+            pinctrl-1 = <&panel_sleep>;
+            ports {
+                #address-cells = <1>;
+                #size-cells = <0>;
+                port@0 {
+                    reg = <0>;
+                    endpoint { remote-endpoint = <&dsi0_out>; };
+                };
+                port@1 {
+                    reg = <1>;
+                    endpoint { remote-endpoint = <&dsi1_out>; };
+                };
+            };
+        };
+    };

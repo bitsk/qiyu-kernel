@@ -8,6 +8,16 @@ config DRM_PANEL
 menu "Display Panels"
 	depends on DRM && DRM_PANEL
 
+config DRM_PANEL_IQIYI_A081
+	tristate "iQIYI Qiyu MIX A081 dual DSI display assembly"
+	depends on OF && DRM_MIPI_DSI && GPIOLIB && PINCTRL
+	depends on REGULATOR && BACKLIGHT_CLASS_DEVICE
+	select DRM_DISPLAY_HELPER
+	select DRM_DISPLAY_DSC_HELPER
+	help
+	  Support the BID-08 A081 display assembly at 72/90 Hz using
+	  dual four-lane DSI, DSC, and the board power sequence.
+
 config DRM_PANEL_ABT_Y030XX067A
 	tristate "ABT Y030XX067A 320x480 LCD panel"
 	depends on OF && SPI
