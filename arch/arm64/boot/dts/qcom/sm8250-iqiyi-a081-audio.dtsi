@@ -1,0 +1,134 @@
+// SPDX-License-Identifier: BSD-3-Clause
+/* A081 stock FDT/mixer routes and the live WCD9385 EFUSE variant. */
+#include <dt-bindings/sound/qcom,q6afe.h>
+#include <dt-bindings/sound/qcom,q6asm.h>
+
+/ {
+	wcd9385: audio-codec {
+		compatible = "qcom,wcd9385-codec";
+		pinctrl-names = "default";
+		pinctrl-0 = <&wcd9385_reset_default>;
+		reset-gpios = <&tlmm 32 GPIO_ACTIVE_LOW>;
+		vdd-buck-supply = <&vreg_s4a>;
+		vdd-rxtx-supply = <&vreg_s4a>;
+		vdd-io-supply = <&vreg_s4a>;
+		vdd-mic-bias-supply = <&vreg_bob>;
+		qcom,micbias1-microvolt = <1800000>;
+		qcom,micbias2-microvolt = <1800000>;
+		qcom,micbias3-microvolt = <1800000>;
+		qcom,micbias4-microvolt = <1800000>;
+		qcom,rx-device = <&wcd9385_rx>;
+		qcom,tx-device = <&wcd9385_tx>;
+		#sound-dai-cells = <1>;
+	};
+};
+
+&apps_rsc {
+	regulators-1 {
+		vreg_bob: bob {
+			regulator-name = "vreg_bob";
+			/* Keep the firmware voltage/mode: stock reads 3.296 V,
+			 * which is not in the upstream PMIC5 BOB selector table.
+			 * This rail also feeds the camera board regulators.
+			 */
+			regulator-boot-on;
+			regulator-always-on;
+		};
+	};
+};
+
+&lpass_tlmm {
+	dmic23_active: dmic23-active-state {
+		clk-pins {
+			pins = "gpio8";
+			function = "dmic2_clk";
+			drive-strength = <8>;
+			output-high;
+		};
+		data-pins {
+			pins = "gpio9";
+			function = "dmic2_data";
+			drive-strength = <8>;
+		};
+	};
+};
+
+&rxmacro {
+	status = "okay";
+};
+
+&q6asmdai {
+	dai@0 {
+		reg = <MSM_FRONTEND_DAI_MULTIMEDIA1>;
+		direction = <Q6ASM_DAI_TX>;
+	};
+};
+
+&sound {
+	compatible = "qcom,sm8250-sndcard";
+	model = "Qiyu MIX WCD9385 DMIC";
+	/* WCD provides bias; VA controls the SoC DMIC clocks and capture. */
+	aux-devs = <&wcd9385>;
+	audio-routing = "DMIC0 Pin", "MIC BIAS1",
+			"DMIC2 Pin", "MIC BIAS3";
+
+	mm1-dai-link {
+		link-name = "MultiMedia1";
+		cpu {
+			sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA1>;
+		};
+	};
+
+	dmic-capture-dai-link {
+		link-name = "DMIC Capture";
+		cpu {
+			sound-dai = <&q6afedai VA_CODEC_DMA_TX_0>;
+		};
+		codec {
+			sound-dai = <&vamacro 0>;
+		};
+		platform {
+			sound-dai = <&q6routing>;
+		};
+	};
+};
+
+&swr1 {
+	status = "okay";
+	wcd9385_rx: codec@0,4 {
+		compatible = "sdw20217010d00";
+		reg = <0 4>;
+		qcom,rx-port-mapping = <1 2 3 4 5>;
+	};
+};
+
+&swr2 {
+	status = "okay";
+	wcd9385_tx: codec@0,3 {
+		compatible = "sdw20217010d00";
+		reg = <0 3>;
+		qcom,tx-port-mapping = <2 3 4 5>;
+	};
+};
+
+&tlmm {
+	wcd9385_reset_default: wcd9385-reset-default-state {
+		pins = "gpio32";
+		function = "gpio";
+		drive-strength = <16>;
+		bias-disable;
+		output-high;
+	};
+};
+
+&txmacro {
+	status = "okay";
+};
+
+&vamacro {
+	pinctrl-names = "default";
+	pinctrl-0 = <&dmic01_active &dmic23_active>;
+	/* Stock TX capture uses these same pins at 2.4 MHz. */
+	qcom,dmic-sample-rate = <2400000>;
+	vdd-micb-supply = <&vreg_s4a>;
+};

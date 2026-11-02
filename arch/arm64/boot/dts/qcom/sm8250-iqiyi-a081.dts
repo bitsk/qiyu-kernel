@@ -1,0 +1,985 @@
+// SPDX-License-Identifier: BSD-3-Clause
+/*
+ * Qiyu MIX (A081), initial Linux bring-up.
+ * Wiring/voltages: Backup-r1-135750 boot + MIX DTBO.
+ * See reports/PORTING.md for evidence and unverified hardware assumptions.
+ */
+
+/dts-v1/;
+
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
+#include <dt-bindings/regulator/qcom,rpmh-regulator.h>
+#include <dt-bindings/thermal/thermal.h>
+#include "sm8250.dtsi"
+#include "pm8150.dtsi"
+#include "pm8150b.dtsi"
+#include "pm8150l.dtsi"
+
+/ {
+	model = "iQIYI Qiyu MIX (A081)";
+	compatible = "iqiyi,a081", "qcom,sm8250";
+
+	/* Live A081: soc_id 356, revision 2.1, ro.boot.dtb_idx=0. */
+	qcom,msm-id = <356 0x20001>;
+	qcom,board-id = <0x01010008 0>;
+
+	aliases {
+		serial0 = &uart12;
+		serial1 = &uart6;
+	};
+
+	/* WCN6851 is the hw1.1 QCA6490 assembly (SoC 0x400c0110).
+	 * All PMU inputs vote the same five physical rails used by stock CNSS/BT.
+	 * Rail voltages are the r1 stock regulator_summary readings with
+	 * WLAN associated; downstream nominal values need not be valid selectors.
+	 * The internal PMU pin grouping follows the WCN6851 HDK description;
+	 * A081 has not independently verified the PMU/MX/CX package pin routes.
+	 */
+	wcn6851-pmu {
+		compatible = "qcom,wcn6851-pmu", "qcom,wcn6855-pmu";
+		pinctrl-names = "default";
+		pinctrl-0 = <&radio_enable_default &bt_swctrl_default>;
+		wlan-enable-gpios = <&tlmm 20 GPIO_ACTIVE_HIGH>;
+		bt-enable-gpios = <&tlmm 21 GPIO_ACTIVE_HIGH>;
+		swctrl-gpios = <&tlmm 124 GPIO_ACTIVE_HIGH>;
+
+		vddio-supply = <&vreg_s4a>;
+		vddaon-supply = <&vreg_s6a>;
+		vddpmu-supply = <&vreg_s6a>;
+		vddpmumx-supply = <&vreg_s2f>;
+		vddpmucx-supply = <&vreg_s6a>;
+		vddrfa0p95-supply = <&vreg_s6a>;
+		vddrfa1p3-supply = <&vreg_s8c>;
+		vddrfa1p9-supply = <&vreg_s5a>;
+		vddpcie1p3-supply = <&vreg_s8c>;
+		vddpcie1p9-supply = <&vreg_s5a>;
+
+		regulators {
+			vreg_pmu_rfa_cmn: ldo0 { regulator-name = "pmu-rfa-cmn"; };
+			vreg_pmu_aon: ldo1 { regulator-name = "pmu-aon"; };
+			vreg_pmu_wlcx: ldo2 { regulator-name = "pmu-wlcx"; };
+			vreg_pmu_wlmx: ldo3 { regulator-name = "pmu-wlmx"; };
+			vreg_pmu_btcmx: ldo4 { regulator-name = "pmu-btcmx"; };
+			vreg_pmu_pcie1p8: ldo5 { regulator-name = "pmu-pcie1p8"; };
+			vreg_pmu_pcie0p9: ldo6 { regulator-name = "pmu-pcie0p9"; };
+			vreg_pmu_rfa0p8: ldo7 { regulator-name = "pmu-rfa0p8"; };
+			vreg_pmu_rfa1p2: ldo8 { regulator-name = "pmu-rfa1p2"; };
+			vreg_pmu_rfa1p7: ldo9 { regulator-name = "pmu-rfa1p7"; };
+		};
+	};
+
+	/* Numeric values from the selected A081 stock battery profile. */
+	a081_battery: battery {
+		compatible = "simple-battery";
+		voltage-max-design-microvolt = <4400000>;
+		charge-full-design-microamp-hours = <5500000>;
+		/* Effective stock BATT_PROFILE votes, read on this A081. */
+		constant-charge-voltage-max-microvolt = <4400000>;
+		constant-charge-current-max-microamp = <5500000>;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+		/* Keep bootloader resources alive during the first diagnostic boot. */
+		bootargs = "console=ttyMSM0,115200n8 earlycon=qcom_geni,0xa90000 keep_bootcon loglevel=8 ignore_loglevel clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=0";
+	};
+
+	fan {
+		compatible = "pwm-fan";
+		pwms = <&pm8150l_lpg 4 40000>;
+		fan-supply = <&fan_power>;
+		cooling-levels = <0 255>;
+		#cooling-cells = <2>;
+	};
+
+	/* Stock fan driver owns global GPIO1214 = TLMM base1100 + GPIO114.
+	 * Voltage and upstream source are not yet known. Do not invent them.
+	 */
+	fan_power: regulator-fan-power {
+		compatible = "regulator-fixed";
+		regulator-name = "fan-power";
+		gpio = <&tlmm 114 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-boot-on;
+	};
+
+	gpio-keys {
+		compatible = "gpio-keys";
+		label = "gpio-keys";
+		pinctrl-names = "default";
+		pinctrl-0 = <&key_back_default &key_confirm_volume_default>;
+
+		key-confirm {
+			label = "confirm";
+			gpios = <&pm8150_gpios 7 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_ENTER>;
+			debounce-interval = <15>;
+			linux,can-disable;
+			wakeup-source;
+		};
+
+		key-back {
+			label = "back";
+			gpios = <&pm8150_gpios 1 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_BACK>;
+			debounce-interval = <15>;
+			linux,can-disable;
+			wakeup-source;
+		};
+
+		key-volume-up {
+			label = "vol_up";
+			gpios = <&pm8150_gpios 6 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_VOLUMEUP>;
+			debounce-interval = <15>;
+			linux,can-disable;
+			wakeup-source;
+		};
+	};
+
+	reserved-memory {
+		/* Stock splash and display dump describe the same physical region. */
+		framebuffer_reserved: memory@9c000000 {
+			reg = <0x0 0x9c000000 0x0 0x2700000>;
+			no-map;
+		};
+
+		/* Stock node's unit address is stale; use its actual reg value. */
+		dfps_reserved: memory@9e700000 {
+			reg = <0x0 0x9e700000 0x0 0x100000>;
+			no-map;
+		};
+	};
+
+	thermal-zones {
+		/* Board NTC telemetry; frequency control uses the on-die TSENS. */
+		skin-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&pm8150_adc_tm 0>;
+		};
+
+		skin-msm-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&pm8150l_adc_tm 0>;
+		};
+	};
+};
+
+/* A081 stock Android step thresholds (r1 capture).
+ * Keep the independent mainline critical trips at 110 C.
+ * The performance profile changes only the first big-core trip at runtime.
+ */
+&cpu0_alert0 {
+	temperature = <110000>;
+	hysteresis = <10000>;
+};
+
+&cpu0_alert1 {
+	temperature = <110000>;
+	hysteresis = <10000>;
+};
+
+&cpu1_alert0 {
+	temperature = <110000>;
+	hysteresis = <10000>;
+};
+
+&cpu1_alert1 {
+	temperature = <110000>;
+	hysteresis = <10000>;
+};
+
+&cpu2_alert0 {
+	temperature = <110000>;
+	hysteresis = <10000>;
+};
+
+&cpu2_alert1 {
+	temperature = <110000>;
+	hysteresis = <10000>;
+};
+
+&cpu3_alert0 {
+	temperature = <110000>;
+	hysteresis = <10000>;
+};
+
+&cpu3_alert1 {
+	temperature = <110000>;
+	hysteresis = <10000>;
+};
+
+&cpu4_top_alert0 {
+	temperature = <75000>;
+	hysteresis = <5000>;
+};
+
+&cpu4_top_alert1 {
+	temperature = <110000>;
+	hysteresis = <10000>;
+};
+
+&cpu4_bottom_alert0 {
+	temperature = <75000>;
+	hysteresis = <5000>;
+};
+
+&cpu4_bottom_alert1 {
+	temperature = <110000>;
+	hysteresis = <10000>;
+};
+
+&cpu5_top_alert0 {
+	temperature = <75000>;
+	hysteresis = <5000>;
+};
+
+&cpu5_top_alert1 {
+	temperature = <110000>;
+	hysteresis = <10000>;
+};
+
+&cpu5_bottom_alert0 {
+	temperature = <75000>;
+	hysteresis = <5000>;
+};
+
+&cpu5_bottom_alert1 {
+	temperature = <110000>;
+	hysteresis = <10000>;
+};
+
+&cpu6_top_alert0 {
+	temperature = <75000>;
+	hysteresis = <5000>;
+};
+
+&cpu6_top_alert1 {
+	temperature = <110000>;
+	hysteresis = <10000>;
+};
+
+&cpu6_bottom_alert0 {
+	temperature = <75000>;
+	hysteresis = <5000>;
+};
+
+&cpu6_bottom_alert1 {
+	temperature = <110000>;
+	hysteresis = <10000>;
+};
+
+&cpu7_top_alert0 {
+	temperature = <75000>;
+	hysteresis = <5000>;
+};
+
+&cpu7_top_alert1 {
+	temperature = <110000>;
+	hysteresis = <10000>;
+};
+
+&cpu7_bottom_alert0 {
+	temperature = <75000>;
+	hysteresis = <5000>;
+};
+
+&cpu7_bottom_alert1 {
+	temperature = <110000>;
+	hysteresis = <10000>;
+};
+
+&gpu_top_alert0 {
+	temperature = <95000>;
+	hysteresis = <0>;
+};
+
+&gpu_bottom_alert0 {
+	temperature = <95000>;
+	hysteresis = <0>;
+};
+
+&pm8150_adc {
+	channel@4d {
+		reg = <ADC5_AMUX_THM1_100K_PU>;
+		qcom,ratiometric;
+		qcom,hw-settle-time = <200>;
+		qcom,pre-scaling = <1 1>;
+		label = "skin_therm";
+	};
+};
+
+&pm8150_adc_tm {
+	status = "okay";
+
+	skin-therm@0 {
+		reg = <0>;
+		io-channels = <&pm8150_adc ADC5_AMUX_THM1_100K_PU>;
+		qcom,ratiometric;
+		qcom,hw-settle-time-us = <200>;
+	};
+};
+
+&pm8150l_adc {
+	/* Stock "test_ipd" voltage input; mechanical mapping is not calibrated. */
+	channel@12 {
+		reg = <ADC5_GPIO1>;
+		qcom,pre-scaling = <1 1>;
+		label = "test_ipd";
+	};
+
+	channel@4e {
+		reg = <ADC5_AMUX_THM2_100K_PU>;
+		qcom,ratiometric;
+		qcom,hw-settle-time = <200>;
+		qcom,pre-scaling = <1 1>;
+		label = "skin_msm_therm";
+	};
+};
+
+&pm8150l_adc_tm {
+	status = "okay";
+
+	skin-msm-therm@0 {
+		reg = <0>;
+		io-channels = <&pm8150l_adc ADC5_AMUX_THM2_100K_PU>;
+		qcom,ratiometric;
+		qcom,hw-settle-time-us = <200>;
+	};
+};
+
+/* The stock PAS IDs, SMP2P/GLINK endpoints and all three carveouts match
+ * sm8250.dtsi. Keep the OEM-signed split images together under this path.
+ */
+&adsp {
+	firmware-name = "qcom/sm8250/iqiyi/a081/adsp.mdt";
+	status = "okay";
+};
+
+&apps_rsc {
+	regulators-0 {
+		compatible = "qcom,pm8150-rpmh-regulators";
+		qcom,pmic-id = "a";
+		qcom,always-wait-for-ack;
+
+		/* Parent rails remain firmware-managed until board routing is known. */
+		vreg_s4a: smps4 {
+			regulator-name = "vreg_s4a";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1920000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l2a: ldo2 {
+			regulator-name = "vreg_l2a";
+			regulator-min-microvolt = <3072000>;
+			regulator-max-microvolt = <3072000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_s5a: smps5 {
+			regulator-name = "vreg_s5a";
+			regulator-min-microvolt = <1824000>;
+			regulator-max-microvolt = <1824000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_s6a: smps6 {
+			regulator-name = "vreg_s6a";
+			regulator-min-microvolt = <600000>;
+			regulator-max-microvolt = <600000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l16a: ldo16 {
+			regulator-name = "vreg_l16a";
+			regulator-min-microvolt = <3024000>;
+			regulator-max-microvolt = <3304000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+			/* Stock BT ASD powers an external RF front end. */
+			regulator-boot-on;
+			regulator-always-on;
+		};
+
+		vreg_l5a: ldo5 {
+			regulator-name = "vreg_l5a";
+			regulator-min-microvolt = <880000>;
+			regulator-max-microvolt = <880000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l6a: ldo6 {
+			regulator-name = "vreg_l6a";
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1200000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l9a: ldo9 {
+			regulator-name = "vreg_l9a";
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1200000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l12a: ldo12 {
+			regulator-name = "vreg_l12a";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l17a: ldo17 {
+			regulator-name = "vreg_l17a";
+			regulator-min-microvolt = <2496000>;
+			regulator-max-microvolt = <3008000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l14a: ldo14 {
+			regulator-name = "vreg_l14a";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1880000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+			regulator-allowed-modes = <RPMH_REGULATOR_MODE_LPM RPMH_REGULATOR_MODE_HPM>;
+			regulator-allow-set-load;
+		};
+	};
+
+	regulators-1 {
+		compatible = "qcom,pm8150l-rpmh-regulators";
+		qcom,pmic-id = "c";
+		qcom,always-wait-for-ack;
+
+		vreg_s8c: smps8 {
+			regulator-name = "vreg_s8c";
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1200000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l5c: ldo5 {
+			regulator-name = "vreg_l5c";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+			/* Stock CNSS antenna switch supply. */
+			regulator-boot-on;
+			regulator-always-on;
+		};
+
+		vreg_l11c: ldo11 {
+			regulator-name = "vreg_l11c";
+			regulator-min-microvolt = <3304000>;
+			regulator-max-microvolt = <3304000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+			/* Stock XR board driver keeps the InvenSense 3.3 V rail on.
+			 * SSC's own sensor rail votes do not replace this AP vote.
+			 */
+			regulator-boot-on;
+			regulator-always-on;
+		};
+	};
+
+	regulators-2 {
+		compatible = "qcom,pm8009-rpmh-regulators";
+		qcom,pmic-id = "f";
+		qcom,always-wait-for-ack;
+
+		vreg_s2f: smps2 {
+			regulator-name = "vreg_s2f";
+			regulator-min-microvolt = <512000>;
+			regulator-max-microvolt = <512000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+	};
+};
+
+&cdsp {
+	firmware-name = "qcom/sm8250/iqiyi/a081/cdsp.mdt";
+	status = "okay";
+};
+
+/* Stock runtime DT chipid is 0x06050002 (Adreno 650). */
+&gmu {
+	status = "okay";
+};
+
+&gpu {
+	status = "okay";
+};
+
+&gpu_zap_shader {
+	/* OEM signed image, extracted from this MIX's original vendor backup. */
+	firmware-name = "qcom/sm8250/iqiyi/a081/a650_zap.mdt";
+};
+
+&mdss {
+	status = "okay";
+};
+
+&mdss_dsi0 {
+	vdda-supply = <&vreg_l9a>;
+	qcom,dual-dsi-mode;
+	qcom,sync-dual-dsi;
+	qcom,master-dsi;
+	status = "okay";
+
+	panel@0 {
+		compatible = "iqiyi,a081-panel";
+		reg = <0>;
+		vddio-supply = <&vreg_l14a>;
+		vsp-supply = <&lcdb_ldo>;
+		vsn-supply = <&lcdb_ncp>;
+		reset-gpios = <&tlmm 75 GPIO_ACTIVE_LOW>;
+		boost-gpios = <&tlmm 3 GPIO_ACTIVE_HIGH>;
+		io-enable-gpios = <&tlmm 140 GPIO_ACTIVE_HIGH>;
+		led-5v-gpios = <&tlmm 134 GPIO_ACTIVE_HIGH>;
+		led1-gpios = <&tlmm 0 GPIO_ACTIVE_HIGH>;
+		led2-gpios = <&tlmm 1 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "active", "sleep";
+		pinctrl-0 = <&panel_active>;
+		pinctrl-1 = <&panel_sleep>;
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			port@0 {
+				reg = <0>;
+				a081_panel_in0: endpoint {
+					remote-endpoint = <&mdss_dsi0_out>;
+				};
+			};
+			port@1 {
+				reg = <1>;
+				a081_panel_in1: endpoint {
+					remote-endpoint = <&mdss_dsi1_out>;
+				};
+			};
+		};
+	};
+};
+
+&mdss_dsi0_out {
+	data-lanes = <0 1 2 3>;
+	remote-endpoint = <&a081_panel_in0>;
+};
+
+&mdss_dsi0_phy {
+	vdds-supply = <&vreg_l5a>;
+	status = "okay";
+};
+
+&mdss_dsi1 {
+	vdda-supply = <&vreg_l9a>;
+	qcom,dual-dsi-mode;
+	qcom,sync-dual-dsi;
+	assigned-clock-parents = <&mdss_dsi0_phy DSI_BYTE_PLL_CLK>,
+				 <&mdss_dsi0_phy DSI_PIXEL_PLL_CLK>;
+	status = "okay";
+};
+
+&mdss_dsi1_out {
+	data-lanes = <0 1 2 3>;
+	remote-endpoint = <&a081_panel_in1>;
+};
+
+&mdss_dsi1_phy {
+	vdds-supply = <&vreg_l5a>;
+	status = "okay";
+};
+
+&gpi_dma0 {
+	status = "okay";
+};
+
+&spi3 {
+	pinctrl-names = "default", "sleep";
+	pinctrl-0 = <&nordic_spi_default>;
+	pinctrl-1 = <&nordic_spi_sleep>;
+	status = "okay";
+
+	radio@0 {
+		compatible = "iqiyi,a081-controller";
+		reg = <0>;
+		spi-max-frequency = <8000000>;
+		interrupt-parent = <&tlmm>;
+		interrupts = <145 IRQ_TYPE_EDGE_RISING>;
+		enable-gpios = <&tlmm 41 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&tlmm 115 GPIO_ACTIVE_LOW>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&nordic_control_default &nordic_irq_default>;
+	};
+};
+
+&tlmm {
+	nordic_spi_default: nordic-spi-default-state {
+		pins = "gpio119", "gpio120", "gpio121", "gpio122";
+		function = "qup3";
+		drive-strength = <6>;
+		bias-disable;
+	};
+
+	nordic_spi_sleep: nordic-spi-sleep-state {
+		pins = "gpio119", "gpio120", "gpio121", "gpio122";
+		function = "gpio";
+		drive-strength = <6>;
+		bias-disable;
+	};
+
+	nordic_control_default: nordic-control-default-state {
+		pins = "gpio41", "gpio115";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	nordic_irq_default: nordic-irq-default-state {
+		pins = "gpio145";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+		output-disable;
+	};
+
+	radio_enable_default: radio-enable-default-state {
+		pins = "gpio20", "gpio21";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	bt_swctrl_default: bt-swctrl-default-state {
+		pins = "gpio124";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	/* Stock groups GPIO60 with reset. It has no panel GPIO request and
+	 * belongs to disabled QUP consumers, so only GPIO75 is claimed here.
+	 */
+	panel_active: panel-active-state {
+		pins = "gpio75";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-disable;
+	};
+
+	panel_sleep: panel-sleep-state {
+		pins = "gpio75";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
+};
+
+&spmi_bus {
+	pmic@2 {
+		charger@1000 {
+			compatible = "qcom,pm8150b-charger";
+			reg = <0x1000>;
+			interrupts = <2 0x13 4 IRQ_TYPE_EDGE_BOTH>,
+				     <2 0x12 2 IRQ_TYPE_EDGE_BOTH>,
+				     <2 0x16 1 IRQ_TYPE_EDGE_RISING>,
+				     <2 0x13 7 IRQ_TYPE_EDGE_RISING>;
+			interrupt-names = "usb-plugin", "bat-ov", "wdog-bark",
+					  "usbin-icl-change";
+			io-channels = <&pm8150b_adc ADC5_USB_IN_I>,
+				      <&pm8150b_adc ADC5_USB_IN_V_16>;
+			io-channel-names = "usbin_i", "usbin_v";
+			monitored-battery = <&a081_battery>;
+			power-supplies = <&pm8150b_typec>;
+			input-current-limit-microamp = <3000000>;
+		};
+
+		a081_fg: fuel-gauge@4000 {
+			compatible = "qcom,pm8150b-fg";
+			reg = <0x4000>;
+			interrupts = <2 0x40 1 IRQ_TYPE_EDGE_BOTH>,
+				     <2 0x40 3 IRQ_TYPE_EDGE_RISING>,
+				     <2 0x42 0 IRQ_TYPE_EDGE_BOTH>,
+				     <2 0x42 2 IRQ_TYPE_EDGE_BOTH>,
+				     <2 0x41 0 IRQ_TYPE_EDGE_BOTH>;
+			interrupt-names = "soc-ready", "msoc-delta", "batt-missing",
+					  "batt-temp-delta", "vbatt-low";
+			monitored-battery = <&a081_battery>;
+#include "sm8250-iqiyi-a081-fg-profile.dtsi"
+			status = "okay";
+		};
+	};
+};
+
+&pm8150b_typec {
+	vdd-pdphy-supply = <&vreg_l2a>;
+	status = "okay";
+
+	connector {
+		compatible = "usb-c-connector";
+		power-role = "sink";
+		data-role = "device";
+		vbus-supply = <&pm8150b_vbus>;
+		/* Use 5 V Type-C Rp current until PD is separately validated. */
+		pd-disable;
+		typec-power-opmode = "default";
+	};
+};
+
+&pm8150b_vbus {
+	regulator-min-microamp = <500000>;
+	regulator-max-microamp = <3000000>;
+	status = "okay";
+};
+
+&pm8150b_adc {
+	/* Stock SID2 ADC5 channels and their analog input dividers. */
+	channel@7 {
+		reg = <ADC5_USB_IN_I>;
+		qcom,pre-scaling = <1 1>;
+		label = "usb_in_i_uv";
+	};
+
+	channel@8 {
+		reg = <ADC5_USB_IN_V_16>;
+		qcom,pre-scaling = <1 16>;
+		label = "usb_in_v_div_16";
+	};
+
+	channel@1e {
+		reg = <ADC5_MID_CHG_DIV6>;
+		qcom,pre-scaling = <1 6>;
+		label = "chg_mid";
+	};
+
+	channel@83 {
+		reg = <ADC5_VPH_PWR>;
+		qcom,pre-scaling = <1 3>;
+		label = "vph_pwr";
+	};
+};
+
+&pm8150_gpios {
+	/* Stock XR board pinctrl supplies the SSC-owned IMU reference clock. */
+	pinctrl-names = "default";
+	pinctrl-0 = <&imu_clkin_default>;
+
+	imu_clkin_default: imu-clkin-state {
+		pins = "gpio3";
+		function = "func1";
+		power-source = <0>;
+		bias-disable;
+		drive-push-pull;
+		qcom,dtest-buffer = <1>;
+		qcom,drive-strength = <PMIC_GPIO_STRENGTH_LOW>;
+		output-low;
+	};
+
+	/* Stock A081 PM8150 SID0: GPIO1 uses VIN0, GPIO6/7 use VIN1. */
+	key_back_default: key-back-state {
+		pins = "gpio1";
+		function = "normal";
+		power-source = <0>;
+		bias-pull-up;
+		input-enable;
+	};
+
+	key_confirm_volume_default: key-confirm-volume-state {
+		pins = "gpio6", "gpio7";
+		function = "normal";
+		power-source = <1>;
+		bias-pull-up;
+		input-enable;
+	};
+};
+
+&pm8150l_gpios {
+	fan_pwm_default: fan-pwm-state {
+		pins = "gpio10";
+		function = "func1";
+		power-source = <0>;
+		bias-disable;
+		drive-push-pull;
+		/* Downstream HIGH=3; the mainline binding uses HIGH=1. */
+		qcom,drive-strength = <PMIC_GPIO_STRENGTH_HIGH>;
+		output-low;
+	};
+};
+
+&pm8150l_lpg {
+	pinctrl-names = "default";
+	pinctrl-0 = <&fan_pwm_default>;
+	status = "okay";
+};
+
+&pon {
+	/* Same PM8998 PON reason as upstream SM8250 HDK/MTP. */
+	mode-bootloader = <0x2>;
+};
+
+&pon_pwrkey {
+	status = "okay";
+};
+
+&pon_resin {
+	linux,code = <KEY_VOLUMEDOWN>;
+	status = "okay";
+};
+
+&spmi_bus {
+	pmic@5 {
+		/* Stock runtime FDT: PM8150L SID5, LCDB at 0xec00.
+		 * Stock applies 5.7 V constraints at registration. The panel driver
+		 * coordinates positive/negative votes through its power sequence.
+		 */
+		regulator@ec00 {
+			compatible = "qcom,pm8150l-lcdb";
+			reg = <0xec00>;
+			interrupts = <0x5 0xec 0x1 IRQ_TYPE_EDGE_RISING>;
+			interrupt-names = "sc-err";
+
+			lcdb_ldo: ldo {
+				regulator-name = "lcdb-ldo";
+				regulator-min-microvolt = <5700000>;
+				regulator-max-microvolt = <5900000>;
+			};
+
+			lcdb_ncp: ncp {
+				regulator-name = "lcdb-ncp";
+				regulator-min-microvolt = <5700000>;
+				regulator-max-microvolt = <5900000>;
+			};
+		};
+	};
+};
+
+&slpi {
+	firmware-name = "qcom/sm8250/iqiyi/a081/slpi.mdt";
+	status = "okay";
+};
+
+/* Stock WLAN: PCIe0 x1 Gen3; modern per-port PHY and reset bindings. */
+&pcie0 {
+	/delete-property/ phys;
+	/delete-property/ phy-names;
+	/delete-property/ perst-gpios;
+	/delete-property/ wake-gpios;
+	status = "okay";
+};
+
+&pcieport0 {
+	phys = <&pcie0_phy>;
+	reset-gpios = <&tlmm 79 GPIO_ACTIVE_LOW>;
+	wake-gpios = <&tlmm 81 GPIO_ACTIVE_HIGH>;
+
+	wifi@0 {
+		compatible = "pci17cb,1103";
+		reg = <0x10000 0x0 0x0 0x0 0x0>;
+		vddrfacmn-supply = <&vreg_pmu_rfa_cmn>;
+		vddaon-supply = <&vreg_pmu_aon>;
+		vddwlcx-supply = <&vreg_pmu_wlcx>;
+		vddwlmx-supply = <&vreg_pmu_wlmx>;
+		vddpcie1p8-supply = <&vreg_pmu_pcie1p8>;
+		vddpcie0p9-supply = <&vreg_pmu_pcie0p9>;
+		vddrfa0p8-supply = <&vreg_pmu_rfa0p8>;
+		vddrfa1p2-supply = <&vreg_pmu_rfa1p2>;
+		vddrfa1p8-supply = <&vreg_pmu_rfa1p7>;
+		qcom,calibration-variant = "iqiyi-a081";
+	};
+};
+
+&pcie0_phy {
+	vdda-phy-supply = <&vreg_l5a>;
+	vdda-pll-supply = <&vreg_l9a>;
+	status = "okay";
+};
+
+&qupv3_id_0 {
+	status = "okay";
+};
+
+&qupv3_id_1 {
+	status = "okay";
+};
+
+&qup_uart12_default {
+	drive-strength = <2>;
+};
+
+/* GPIO16..19 with RTS/CTS. Only the shared PMU owns BT_EN. */
+&uart6 {
+	status = "okay";
+
+	bluetooth {
+		compatible = "qcom,wcn6851-bt", "qcom,wcn6855-bt";
+		max-speed = <3200000>;
+		vddaon-supply = <&vreg_pmu_aon>;
+		vddbtcmx-supply = <&vreg_pmu_btcmx>;
+		vddrfa0p8-supply = <&vreg_pmu_rfa0p8>;
+		vddrfa1p2-supply = <&vreg_pmu_rfa1p2>;
+		vddrfa1p7-supply = <&vreg_pmu_rfa1p7>;
+		vddrfacmn-supply = <&vreg_pmu_rfa_cmn>;
+		vddwlcx-supply = <&vreg_pmu_wlcx>;
+		vddwlmx-supply = <&vreg_pmu_wlmx>;
+	};
+};
+
+&qup_uart6_default {
+	drive-strength = <2>;
+	bias-disable;
+};
+
+&uart12 {
+	status = "okay";
+};
+
+/* Diagnostic log sink: userspace only writes a guarded recovery_b tail area. */
+&ufs_mem_hc {
+	vcc-supply = <&vreg_l17a>;
+	vcc-max-microamp = <800000>;
+	vccq-supply = <&vreg_l6a>;
+	vccq-max-microamp = <800000>;
+	vccq2-supply = <&vreg_s4a>;
+	vccq2-max-microamp = <800000>;
+	/* Stock uses the dedicated ufs_reset pad, not EGPIO-capable GPIO175. */
+	reset-gpios = <&tlmm 180 GPIO_ACTIVE_LOW>;
+	status = "okay";
+};
+
+&ufs_mem_phy {
+	vdda-phy-supply = <&vreg_l5a>;
+	vdda-pll-supply = <&vreg_l9a>;
+	status = "okay";
+};
+
+&usb_1 {
+	/* No SSPHY: the core must use UTMI instead of the USB3 PIPE clock. */
+	qcom,select-utmi-as-pipe-clk;
+	status = "okay";
+};
+
+&usb_1_dwc3 {
+	dr_mode = "peripheral";
+	maximum-speed = "high-speed";
+	phys = <&usb_1_hsphy>;
+	phy-names = "usb2-phy";
+};
+
+&usb_1_hsphy {
+	vdda-pll-supply = <&vreg_l5a>;
+	vdda18-supply = <&vreg_l12a>;
+	vdda33-supply = <&vreg_l2a>;
+	status = "okay";
+};
+
+#include "sm8250-iqiyi-a081-cameras.dtsi"
+#include "sm8250-iqiyi-a081-audio.dtsi"
+
+/* Stock A081 PAS 9 firmware; SM8250 already reserves its 5 MiB at
+ * 0x86e00000 and describes the matching IRQ, clocks, GDSCs and SMMU SID.
+ * Use this headset's signed split image, not another board's firmware.
+ */
+&venus {
+	firmware-name = "qcom/sm8250/iqiyi/a081/venus.mdt";
+	status = "okay";
+};

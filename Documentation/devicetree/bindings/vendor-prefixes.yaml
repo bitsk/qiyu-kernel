@@ -855,6 +855,8 @@ patternProperties:
     description: Inverse Path
   "^iom,.*":
     description: Iomega Corporation
+  "^iqiyi,.*":
+    description: iQIYI, Inc.
   "^irondevice,.*":
     description: Iron Device Corporation
   "^isee,.*":

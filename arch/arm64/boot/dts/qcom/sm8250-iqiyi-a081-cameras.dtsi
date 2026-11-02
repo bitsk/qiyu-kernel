@@ -1,0 +1,467 @@
+// SPDX-License-Identifier: BSD-3-Clause
+/* A081 stock runtime FDT + six live-verified QTI sensor configurations.
+ * Slot 0/1: CCI0 bus 0/1, PHY5/4; slot 2/3: CCI1 bus 0/1, PHY2/3.
+ * Sensor endpoints number the source lanes; Qualcomm PHY numbers data from
+ * zero and the dedicated clock lane as seven.
+ */
+#include <dt-bindings/media/video-interfaces.h>
+
+/ {
+	cam_pair01_avdd: regulator-cam-pair01-avdd {
+		compatible = "regulator-fixed";
+		regulator-name = "cam-pair01-avdd";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+		vin-supply = <&vreg_l6f>;
+		gpio = <&tlmm 43 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <1000>;
+	};
+
+	cam_pair01_iovdd: regulator-cam-pair01-iovdd {
+		compatible = "regulator-fixed";
+		regulator-name = "cam-pair01-iovdd";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		vin-supply = <&vreg_l7f>;
+		gpio = <&tlmm 42 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <1000>;
+	};
+
+	cam_pair23_avdd: regulator-cam-pair23-avdd {
+		compatible = "regulator-fixed";
+		regulator-name = "cam-pair23-avdd";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+		vin-supply = <&vreg_l6f>;
+		gpio = <&tlmm 117 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <1000>;
+	};
+
+	cam_pair23_iovdd: regulator-cam-pair23-iovdd {
+		compatible = "regulator-fixed";
+		regulator-name = "cam-pair23-iovdd";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		vin-supply = <&vreg_l7f>;
+		gpio = <&tlmm 116 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <1000>;
+	};
+
+	cam_io_left: regulator-cam-io-left {
+		compatible = "regulator-fixed";
+		regulator-name = "cam-io-left";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		gpio = <&tlmm 10 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		/* Shared module IO: stock OV power-up votes cam_vaf. */
+		regulator-boot-on;
+		regulator-always-on;
+	};
+
+	cam_io_right: regulator-cam-io-right {
+		compatible = "regulator-fixed";
+		regulator-name = "cam-io-right";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		gpio = <&tlmm 13 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		/* Shared module IO: stock OV power-up votes cam_vaf. */
+		regulator-boot-on;
+		regulator-always-on;
+	};
+
+};
+
+&apps_rsc {
+	regulators-2 {
+		vreg_l6f: ldo6 {
+			regulator-name = "vreg_l6f";
+			regulator-min-microvolt = <2800000>;
+			regulator-max-microvolt = <2800000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l7f: ldo7 {
+			regulator-name = "vreg_l7f";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+			/* Shared camera interface rail, also voted by stock IMX471.
+			 * Its CCI bus times out when OV7251 drops the last vote.
+			 * Keep it on until the board's shared IO power is modeled.
+			 */
+			regulator-always-on;
+		};
+	};
+};
+
+&camss {
+	vdda-phy-supply = <&vreg_l5a>;
+	vdda-pll-supply = <&vreg_l9a>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&controller_phase_default>;
+	/* Stock camera2 CAM_C1/CAM_C2; sampled by Nordic at the next FSIN. */
+	qcom,controller-phase-gpios = <&tlmm 92 GPIO_ACTIVE_HIGH>,
+				      <&tlmm 93 GPIO_ACTIVE_HIGH>;
+	qcom,controller-phase-csid = <2>;
+	status = "okay";
+
+	ports {
+		port@5 {
+			csiphy5_ep: endpoint {
+				clock-lanes = <7>;
+				data-lanes = <0>;
+				bus-type = <MEDIA_BUS_TYPE_CSI2_DPHY>;
+				remote-endpoint = <&ov7251_0_ep>;
+			};
+		};
+		port@4 {
+			csiphy4_ep: endpoint {
+				clock-lanes = <7>;
+				data-lanes = <0>;
+				bus-type = <MEDIA_BUS_TYPE_CSI2_DPHY>;
+				remote-endpoint = <&ov7251_1_ep>;
+			};
+		};
+		port@2 {
+			csiphy2_ep: endpoint {
+				clock-lanes = <7>;
+				data-lanes = <0>;
+				bus-type = <MEDIA_BUS_TYPE_CSI2_DPHY>;
+				remote-endpoint = <&ov7251_2_ep>;
+			};
+		};
+		port@3 {
+			csiphy3_ep: endpoint {
+				clock-lanes = <7>;
+				data-lanes = <0>;
+				bus-type = <MEDIA_BUS_TYPE_CSI2_DPHY>;
+				remote-endpoint = <&ov7251_3_ep>;
+			};
+		};
+	};
+};
+
+&cci0 { status = "okay"; };
+&cci1 { status = "okay"; };
+
+&cci0_i2c0 {
+	ov7251_0: camera@60 {
+		compatible = "ovti,ov7251";
+		reg = <0x60>;
+		clocks = <&camcc CAM_CC_MCLK5_CLK>;
+		clock-names = "xclk";
+		assigned-clocks = <&camcc CAM_CC_MCLK5_CLK>;
+		assigned-clock-rates = <24000000>;
+		vdda-supply = <&cam_pair01_avdd>;
+		vdddo-supply = <&cam_pair01_iovdd>;
+		enable-gpios = <&tlmm 130 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam0_a081_default>;
+
+		port {
+			ov7251_0_ep: endpoint {
+				clock-lanes = <0>;
+				data-lanes = <1>;
+				link-frequencies = /bits/ 64 <240000000>;
+				remote-endpoint = <&csiphy5_ep>;
+			};
+		};
+	};
+};
+
+&cci0_i2c1 {
+	ov7251_1: camera@60 {
+		compatible = "ovti,ov7251";
+		reg = <0x60>;
+		clocks = <&camcc CAM_CC_MCLK4_CLK>;
+		clock-names = "xclk";
+		assigned-clocks = <&camcc CAM_CC_MCLK4_CLK>;
+		assigned-clock-rates = <24000000>;
+		vdda-supply = <&cam_pair01_avdd>;
+		vdddo-supply = <&cam_pair01_iovdd>;
+		enable-gpios = <&tlmm 131 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam1_a081_default>;
+
+		port {
+			ov7251_1_ep: endpoint {
+				clock-lanes = <0>;
+				data-lanes = <1>;
+				link-frequencies = /bits/ 64 <240000000>;
+				remote-endpoint = <&csiphy4_ep>;
+			};
+		};
+	};
+};
+
+&cci1_i2c0 {
+	ov7251_2: camera@60 {
+		compatible = "ovti,ov7251";
+		reg = <0x60>;
+		clocks = <&camcc CAM_CC_MCLK2_CLK>;
+		clock-names = "xclk";
+		assigned-clocks = <&camcc CAM_CC_MCLK2_CLK>;
+		assigned-clock-rates = <24000000>;
+		vdda-supply = <&cam_pair23_avdd>;
+		vdddo-supply = <&cam_pair23_iovdd>;
+		enable-gpios = <&tlmm 78 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam2_a081_default>;
+
+		port {
+			ov7251_2_ep: endpoint {
+				clock-lanes = <0>;
+				data-lanes = <1>;
+				link-frequencies = /bits/ 64 <240000000>;
+				remote-endpoint = <&csiphy2_ep>;
+			};
+		};
+	};
+};
+
+&cci1_i2c1 {
+	ov7251_3: camera@60 {
+		compatible = "ovti,ov7251";
+		reg = <0x60>;
+		clocks = <&camcc CAM_CC_MCLK3_CLK>;
+		clock-names = "xclk";
+		assigned-clocks = <&camcc CAM_CC_MCLK3_CLK>;
+		assigned-clock-rates = <24000000>;
+		vdda-supply = <&cam_pair23_avdd>;
+		vdddo-supply = <&cam_pair23_iovdd>;
+		enable-gpios = <&tlmm 109 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam3_a081_default>;
+
+		port {
+			ov7251_3_ep: endpoint {
+				clock-lanes = <0>;
+				data-lanes = <1>;
+				link-frequencies = /bits/ 64 <240000000>;
+				remote-endpoint = <&csiphy3_ep>;
+			};
+		};
+	};
+};
+
+&tlmm {
+	controller_phase_default: controller-phase-default-state {
+		pins = "gpio92", "gpio93";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+		output-low;
+	};
+
+	cam0_a081_default: cam0-a081-default-state {
+		mclk-pins {
+			pins = "gpio99";
+			function = "cam_mclk";
+			drive-strength = <2>;
+			bias-disable;
+		};
+		reset-pins {
+			pins = "gpio130";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-disable;
+		};
+	};
+	cam1_a081_default: cam1-a081-default-state {
+		mclk-pins {
+			pins = "gpio98";
+			function = "cam_mclk";
+			drive-strength = <2>;
+			bias-disable;
+		};
+		reset-pins {
+			pins = "gpio131";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-disable;
+		};
+	};
+	cam2_a081_default: cam2-a081-default-state {
+		mclk-pins {
+			pins = "gpio96";
+			function = "cam_mclk";
+			drive-strength = <2>;
+			bias-disable;
+		};
+		reset-pins {
+			pins = "gpio78";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-disable;
+		};
+	};
+	cam3_a081_default: cam3-a081-default-state {
+		mclk-pins {
+			pins = "gpio97";
+			function = "cam_mclk";
+			drive-strength = <2>;
+			bias-disable;
+		};
+		reset-pins {
+			pins = "gpio109";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-disable;
+		};
+	};
+};
+
+/ {
+	cam_rgb_left_avdd: regulator-cam-rgb-left-avdd {
+		compatible = "regulator-fixed";
+		regulator-name = "cam-rgb-left-avdd";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+		gpio = <&tlmm 11 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <1000>;
+	};
+	cam_rgb_left_dvdd: regulator-cam-rgb-left-dvdd {
+		compatible = "regulator-fixed";
+		regulator-name = "cam-rgb-left-dvdd";
+		regulator-min-microvolt = <1050000>;
+		regulator-max-microvolt = <1050000>;
+		gpio = <&tlmm 9 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <1000>;
+	};
+	cam_rgb_right_avdd: regulator-cam-rgb-right-avdd {
+		compatible = "regulator-fixed";
+		regulator-name = "cam-rgb-right-avdd";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+		gpio = <&tlmm 14 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <1000>;
+	};
+	cam_rgb_right_dvdd: regulator-cam-rgb-right-dvdd {
+		compatible = "regulator-fixed";
+		regulator-name = "cam-rgb-right-dvdd";
+		regulator-min-microvolt = <1050000>;
+		regulator-max-microvolt = <1050000>;
+		gpio = <&tlmm 12 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <1000>;
+	};
+};
+
+&cci0_i2c1 {
+	imx471_4: camera@1a {
+		compatible = "sony,imx471";
+		reg = <0x1a>;
+		clocks = <&camcc CAM_CC_MCLK1_CLK>;
+		assigned-clocks = <&camcc CAM_CC_MCLK1_CLK>;
+		/* Use the upstream driver's 19.2 MHz PLL/mode table. */
+		assigned-clock-rates = <19200000>;
+		vana-supply = <&cam_rgb_right_avdd>;
+		vdig-supply = <&cam_rgb_right_dvdd>;
+		vif-supply = <&cam_io_right>;
+		reset-gpios = <&tlmm 23 GPIO_ACTIVE_LOW>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&imx471_4_default>;
+		status = "okay";
+		port {
+			imx471_4_ep: endpoint {
+				data-lanes = <1 2 3 4>;
+				link-frequencies = /bits/ 64 <200000000>;
+				remote-endpoint = <&csiphy1_rgb_ep>;
+			};
+		};
+	};
+};
+
+&camss {
+	ports {
+		port@1 {
+			csiphy1_rgb_ep: endpoint {
+				clock-lanes = <7>;
+				data-lanes = <0 1 2 3>;
+				bus-type = <MEDIA_BUS_TYPE_CSI2_DPHY>;
+				remote-endpoint = <&imx471_4_ep>;
+			};
+		};
+	};
+};
+
+&tlmm {
+	imx471_4_default: imx471-4-default-state {
+		mclk-pins {
+			pins = "gpio95";
+			function = "cam_mclk";
+			drive-strength = <2>;
+			bias-disable;
+		};
+		reset-pins {
+			pins = "gpio23";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-disable;
+		};
+	};
+};
+
+&cci0_i2c0 {
+	imx471_5: camera@1a {
+		compatible = "sony,imx471";
+		reg = <0x1a>;
+		clocks = <&camcc CAM_CC_MCLK0_CLK>;
+		assigned-clocks = <&camcc CAM_CC_MCLK0_CLK>;
+		/* Use the upstream driver's 19.2 MHz PLL/mode table. */
+		assigned-clock-rates = <19200000>;
+		vana-supply = <&cam_rgb_left_avdd>;
+		vdig-supply = <&cam_rgb_left_dvdd>;
+		vif-supply = <&cam_io_left>;
+		reset-gpios = <&tlmm 5 GPIO_ACTIVE_LOW>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&imx471_5_default>;
+		status = "okay";
+		port {
+			imx471_5_ep: endpoint {
+				data-lanes = <1 2 3 4>;
+				link-frequencies = /bits/ 64 <200000000>;
+				remote-endpoint = <&csiphy0_rgb_ep>;
+			};
+		};
+	};
+};
+
+&camss {
+	ports {
+		port@0 {
+			csiphy0_rgb_ep: endpoint {
+				clock-lanes = <7>;
+				data-lanes = <0 1 2 3>;
+				bus-type = <MEDIA_BUS_TYPE_CSI2_DPHY>;
+				remote-endpoint = <&imx471_5_ep>;
+			};
+		};
+	};
+};
+
+&tlmm {
+	imx471_5_default: imx471-5-default-state {
+		mclk-pins {
+			pins = "gpio94";
+			function = "cam_mclk";
+			drive-strength = <2>;
+			bias-disable;
+		};
+		reset-pins {
+			pins = "gpio5";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-disable;
+		};
+	};
+};
