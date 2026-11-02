@@ -6,7 +6,6 @@ Qualcomm SM8250 板级适配，内核版本 `7.3.0-qiyu-mix`。驱动源码冻�
 | --- | --- |
 | 内核配置 | [config/kernel.config](config/kernel.config) |
 | 累计补丁 | [patches/a081-v7.3.patch](patches/a081-v7.3.patch)，已应用 |
-| 发布清单 | [manifest.json](manifest.json) |
 | 温控工具 | [thermal](thermal/) |
 
 ## 构建
@@ -32,7 +31,6 @@ Debian/Ubuntu 主机需 GNU make、GCC arm64 交叉工具链、binutils、bc、b
 原实机 recovery SHA-256（历史追溯，不是本次更名后镜像的摘要）：
 
 ```text
-70df861523a19b65879b0ca85c894143089f35b69bf2e38cff3f3e7df33e8fa2
 ```
 
 ## Release 附件
