@@ -5,6 +5,14 @@
 
 menu "Misc devices"
 
+config A081_NORDIC
+	tristate "iQIYI A081 Nordic controller radio transport"
+	depends on SPI && GPIOLIB && OF
+	help
+	  Expose the board radio's 36-byte full-duplex SPI transport
+	  and pollable data-ready notifications. Protocol decoding
+	  and controller tracking remain in userspace.
+
 config SENSORS_LIS3LV02D
 	tristate
 	depends on INPUT

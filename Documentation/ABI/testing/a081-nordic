@@ -1,0 +1,50 @@
+What: /dev/a081-nordic
+Date: October 2026
+Contact: Qiyu Project <qiyu@example.invalid>
+Description:
+        Exclusive, root-only access to the A081 Nordic radio transport.
+        poll() reports readable after a data-ready IRQ. Use a bounded poll
+        timeout in userspace; the driver does not wait for a radio IRQ inside
+        the ioctl. A081_NORDIC_IOC_DUAL_TRANSFER from linux/a081-nordic.h exchanges
+        exactly 72 bytes, SPI mode 0, 8 bits per word, at the DT clock rate.
+        With no unconsumed IRQ it returns EAGAIN; removal returns ENODEV/HUP.
+
+        Only tx[72] is input. Output includes raw rx[72], CLOCK_MONOTONIC
+        data-ready IRQ and transfer-completion times in ns, and a cumulative
+        IRQ sequence. Sequence gaps expose coalesced notifications, not a
+        claim about the number of buffered radio packets. An IRQ during an
+        exchange remains pending. Timestamp fields are host transport times,
+        not controller IMU sampling/exposure times. One old notification may
+        be visible on reopening; inspect returned RX and sequence.
+
+        No framing/CRC, retry, pairing, haptic, or controller-clock policy is
+        implemented in the kernel. Userspace initializes idle TX to
+        72 bytes of0xee; this is not a copy of OEM stack padding. RX contains
+        two36-byte packets, each independently beginning a5 5a. Userspace must decode packets and retain
+        queued commands until an exchange succeeds; no command acknowledgement
+        is implied by transport completion. A transfer can
+        consume a packet even if copying its result to userspace fails.
+
+What: /sys/bus/spi/devices/spiB.C/irq_count
+What: /sys/bus/spi/devices/spiB.C/transfer_count
+Date: October 2026
+Contact: Qiyu Project <qiyu@example.invalid>
+Description:
+        Data-ready interrupts and successful SPI exchanges since probe.
+        These count transport activity, not valid controller packets.
+
+What: /sys/bus/spi/devices/spiB.C/reset_asserted
+Date: October 2026
+Contact: Qiyu Project <qiyu@example.invalid>
+Description:
+        Root-writable reset control, serialized with SPI exchanges. Writing
+        1 asserts reset (A081 GPIO115 low); writing 0 releases it (GPIO115
+        high). Reading returns the GPIO's logical assertion state. Standard
+        boolean strings accepted by kstrtobool are also supported.
+
+        Probe enables power on GPIO41 and leaves reset asserted. Userspace
+        releases reset at the camera/radio startup boundary. Changing reset
+        does not disable power, unbind the device, close an existing transport
+        file, or clear irq_count/transfer_count. An open transport does not
+        prevent reset. Removal returns ENODEV. IRQ counts and queued packet
+        interpretation remain the userspace owner's responsibility.
