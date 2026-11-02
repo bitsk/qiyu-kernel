@@ -1,0 +1,22 @@
+{
+  "factory": {
+    "label": "原厂",
+    "cpu_big_mc": 75000,
+    "cpu_big_hysteresis_mc": 5000,
+    "gpu_mc": 95000,
+    "gpu_hysteresis_mc": 0,
+    "cpu_governor": "schedutil",
+    "gpu_governor": "simple_ondemand",
+    "fan_pwm": 255
+  },
+  "performance": {
+    "label": "性能",
+    "cpu_big_mc": 85000,
+    "cpu_big_hysteresis_mc": 5000,
+    "gpu_mc": 95000,
+    "gpu_hysteresis_mc": 0,
+    "cpu_governor": "performance",
+    "gpu_governor": "performance",
+    "fan_pwm": 255
+  }
+}

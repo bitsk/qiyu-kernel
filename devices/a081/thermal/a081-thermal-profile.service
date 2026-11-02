@@ -1,0 +1,13 @@
+[Unit]
+Description=A081 factory or performance thermal profile
+After=systemd-modules-load.service
+ConditionPathExists=/etc/a081-rootfs-id
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/a081-thermal/a081-thermal-profile boot --wait 120
+TimeoutStartSec=130
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""Select A081 factory/performance cooling and DVFS; never change critical trips."""
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import tempfile
+import time
+
+BASE = Path(__file__).resolve().parent
+PROFILES = json.loads((BASE / 'profiles.json').read_text())
+SELECTED = Path('/etc/a081-thermal-profile')
+APPLIED = Path('/run/a081-thermal-profile.json')
+
+
+def read(path):
+    return path.read_text().strip()
+
+
+def discover():
+    zones = {read(p / 'type'): p for p in Path('/sys/class/thermal').glob('thermal_zone*')}
+    big = [f'cpu{n}-{side}-thermal' for n in range(4, 8) for side in ('top', 'bottom')]
+    little = [f'cpu{n}-thermal' for n in range(4)]
+    gpu = ['gpu-top-thermal', 'gpu-bottom-thermal']
+    required = big + little + gpu + ['skin-thermal', 'skin-msm-thermal']
+    if any(name not in zones for name in required):
+        raise RuntimeError('Required thermal sensors are not registered')
+    for name in required[-2:]:
+        if list(zones[name].glob('cdev[0-9]*_trip_point')):
+            raise RuntimeError('Boot the A081 thermal profiles image first')
+    for name in big + little + gpu:
+        critical = [p for p in zones[name].glob('trip_point_*_type') if read(p) == 'critical']
+        if not critical or any(read(p.with_name(p.name.replace('_type', '_temp'))) != '110000'
+                               for p in critical):
+            raise RuntimeError('Unexpected critical protection: ' + name)
+        if read(zones[name] / 'mode') != 'enabled':
+            raise RuntimeError('Thermal protection disabled: ' + name)
+        if read(zones[name] / 'policy') != 'step_wise':
+            raise RuntimeError('Unexpected thermal governor: ' + name)
+    cpus = [Path('/sys/devices/system/cpu/cpufreq') / f'policy{n}' for n in (0, 4, 7)]
+    devfreq = Path('/sys/class/devfreq/3d00000.gpu')
+    fans = [p for p in Path('/sys/class/hwmon').glob('hwmon*')
+            if (p / 'name').exists() and read(p / 'name') == 'pwmfan']
+    if not all(p.is_dir() for p in cpus) or not devfreq.is_dir() or len(fans) != 1:
+        raise RuntimeError('CPU/GPU/fan controls are not ready')
+    return zones, big, little, gpu, cpus, devfreq, fans[0]
+
+
+def status():
+    zones, big, little, gpu, cpus, devfreq, fan = discover()
+    result = dict(selected=read(SELECTED) if SELECTED.exists() else 'factory',
+                  last_apply=json.loads(APPLIED.read_text()) if APPLIED.exists() else None,
+                  boot_id=read(Path('/proc/sys/kernel/random/boot_id')))
+    result['zones'] = {}
+    for name in big + little + gpu + ['skin-thermal', 'skin-msm-thermal']:
+        zone = zones[name]
+        result['zones'][name] = {p.name: read(p) for p in zone.glob('trip_point_*') if p.is_file()}
+        result['zones'][name]['temp'] = read(zone / 'temp')
+    result['cpu'] = {p.name: {k: read(p / k) for k in
+                            ('scaling_governor', 'scaling_cur_freq', 'scaling_max_freq', 'cpuinfo_max_freq')}
+                     for p in cpus}
+    result['gpu'] = {k: read(devfreq / k) for k in ('governor', 'cur_freq', 'min_freq', 'max_freq')}
+    result['fan_pwm'] = read(fan / 'pwm1')
+    result['cooling'] = {read(p / 'type'): read(p / 'cur_state')
+                         for p in Path('/sys/class/thermal').glob('cooling_device*')}
+    return result
+
+
+def atomic_write(path, text):
+    with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, delete=False) as f:
+        tmp = Path(f.name)
+        try:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+            os.chmod(tmp, 0o644)
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+
+def apply(name, persist):
+    config = PROFILES[name]
+    zones, big, little, gpu, cpus, devfreq, fan = discover()
+    writes = [(fan / 'pwm1', str(config['fan_pwm']))]
+    for names, temp, hyst in ((big, config['cpu_big_mc'], config['cpu_big_hysteresis_mc']),
+                              (little, 110000, 10000),
+                              (gpu, config['gpu_mc'], config['gpu_hysteresis_mc'])):
+        for zone_name in names:
+            zone = zones[zone_name]
+            if read(zone / 'trip_point_0_type') != 'passive':
+                raise RuntimeError('Unexpected first trip: ' + zone_name)
+            writes.extend([(zone / 'trip_point_0_hyst', str(hyst)),
+                           (zone / 'trip_point_0_temp', str(temp))])
+            if zone_name in big + little:
+                if read(zone / 'trip_point_1_type') != 'passive':
+                    raise RuntimeError('Unexpected secondary CPU trip')
+                writes.extend([(zone / 'trip_point_1_hyst', '10000'),
+                               (zone / 'trip_point_1_temp', '110000')])
+    for cpu in cpus:
+        if config['cpu_governor'] not in read(cpu / 'scaling_available_governors').split():
+            raise RuntimeError('CPU governor unavailable')
+        writes.append((cpu / 'scaling_governor', config['cpu_governor']))
+    if config['gpu_governor'] not in read(devfreq / 'available_governors').split():
+        raise RuntimeError('GPU governor unavailable')
+    writes.append((devfreq / 'governor', config['gpu_governor']))
+    # Capture everything before the first write, and unwind a failed switch.
+    before = [(path, read(path)) for path, _ in writes]
+    saved_files = {path: path.read_text() if path.exists() else None
+                   for path in (SELECTED, APPLIED)}
+    changed = []
+    try:
+        for (path, value), (_, old) in zip(writes, before):
+            if old == value:
+                continue
+            changed.append((path, old))
+            path.write_text(value + '\n')
+            if read(path) != value:
+                raise RuntimeError('Readback mismatch: ' + str(path))
+        result = status()
+        result.update(applied=name, persisted=persist)
+        if persist:
+            atomic_write(SELECTED, name + '\n')
+        atomic_write(APPLIED, json.dumps(dict(profile=name, boot_id=result['boot_id'],
+                                            applied_at=time.time()), indent=2) + '\n')
+        result['selected'] = read(SELECTED) if SELECTED.exists() else 'factory'
+        return result
+    except Exception as error:
+        rollback_errors = []
+        for path, old in saved_files.items():
+            try:
+                if old is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    atomic_write(path, old)
+            except Exception as rollback_error:
+                rollback_errors.append(f'{path}: {rollback_error}')
+        for path, old in reversed(changed):
+            try:
+                path.write_text(old + '\n')
+                if read(path) != old:
+                    raise RuntimeError('readback mismatch')
+            except Exception as rollback_error:
+                rollback_errors.append(f'{path}: {rollback_error}')
+        raise RuntimeError(f'Profile switch failed: {error}; rollback errors: {rollback_errors}') from error
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('profile', choices=['factory', 'performance', 'boot', 'status'])
+    parser.add_argument('--persist', action='store_true', help='Use this profile on subsequent boots')
+    parser.add_argument('--wait', type=int, default=0, help='Wait this many seconds for device controls')
+    args = parser.parse_args()
+    if args.profile == 'status':
+        print(json.dumps(status(), indent=2, ensure_ascii=False))
+        return
+    if os.geteuid() != 0:
+        parser.error('Profile changes require root')
+    if 'A081' not in Path('/proc/device-tree/model').read_text():
+        parser.error('Expected A081 hardware')
+    if read(Path('/etc/a081-rootfs-id')) not in ('a081-steamos-arm64', 'a081-debian-trixie-arm64'):
+        parser.error('Expected installed A081 rootfs')
+    name = (read(SELECTED) if SELECTED.exists() else 'factory') if args.profile == 'boot' else args.profile
+    if name not in PROFILES:
+        parser.error('Unknown saved profile')
+    with Path('/run/a081-thermal-profile.lock').open('w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        deadline = time.monotonic() + args.wait
+        while True:
+            try:
+                discover()
+                break
+            except RuntimeError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(1)
+        print(json.dumps(apply(name, args.persist), indent=2, ensure_ascii=False))
+
+
+if __name__ == '__main__':
+    main()
