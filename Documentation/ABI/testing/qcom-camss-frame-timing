@@ -1,0 +1,174 @@
+What:		/dev/v4l-subdev* (CAMSS gen2 CSID), V4L2_EVENT_FRAME_SYNC
+Date:		October 2026
+Contact:	A081 mainline port
+Description:
+		Subscribe with id=0 on the CSID subdevice. Notifications are
+		available only with a single enabled RDI source link, so the
+		media graph identifies the stream without a private event ID.
+		Multiple enabled RDI links are rejected at subscription time;
+		notifications are suppressed if the graph becomes ambiguous.
+
+		frame_sequence counts observed input-SOF interrupts, starts
+		at zero on STREAMON, and wraps at 32 bits. It is not a sensor
+		frame counter or a match for a video buffer's sequence. IRQ
+		coalescing and event queue overflow can lose observations.
+		The event timestamp is CLOCK_MONOTONIC notification time,
+		not latched hardware SOF and not exposure start. This event
+		can be used to wait until each camera has started receiving.
+
+What:		/sys/module/qcom_camss/parameters/frame_headers
+Date:		October 2026
+Contact:	A081 mainline port
+Description:
+		Read-only boolean module parameter, default Y in the cammeta
+		baseline (the validated hrtimer baseline default is N).
+		Load with frame_headers=0 to disable the SM8250 VFE480
+		per-buffer DMA header path. Each video buffer gets a separate
+		128-byte coherent allocation in the image DMA domain. No
+		image format, stride, plane layout or payload is changed.
+
+		The header holds a 56-bit QTimer SOF value in word[1]<<24 |
+		word[0]>>8, as decoded by the downstream bus-v3 driver. Other
+		bits are uninterpreted. The configured cookie is software
+		enqueue order; no header frame ID or cookie echo is assumed.
+
+		Timestamp validation requires an exact match between the
+		header SOF and a retained CSID SOF/EOF pair. Empty,
+		overwritten or unmatched timestamps mark the
+		buffer ERROR. V4L2 timestamps retain EOF source semantics;
+		timestamps on ERROR buffers must not be used for tracking.
+		Setting N preserves the earlier CSID EOF timestamp path but
+		cannot provide valid per-buffer timing metadata.
+
+		With timestamp_debug=1, existing frame diagnostics also
+		include buffer index, configured cookie, header SOF, the
+		first four raw little-endian header words, clock-read bracket
+		and lookup status. These printk records are diagnostic, not
+		a stable per-frame metadata interface. Two-slot image/header
+		FIFO pairing and the two SOF latch stages matched in a bounded
+		A081 four-stream run: 160 frames per stream, eight buffers each
+		reused twenty times, with every header SOF equal to its CSID
+		SOF and all lookups valid. This covers normal capture only,
+		not delayed interrupts, starvation or recovery. These logs
+		are not a production SOF
+		metadata interface. Neither SOF nor EOF is sensor exposure
+		start. Evidence: reports/device/camera-barrier-r1/ in
+		the A081 port workspace.
+
+What:		/dev/video* named msm_vfeN_videoM_timing, format QCFT
+Date:		October 2026
+Contact:	A081 mainline port
+Description:
+		A081 port ABI, not accepted upstream. Two bounded four-stream
+		sessions validated 960 records against 1280 images, including
+		normal close/reopen; see camera-metadata-r1 results. SM8250 RDI image nodes have an ancillary-linked
+		V4L2_BUF_TYPE_META_CAPTURE node named IMAGE_ENTITY_timing.
+		Discover by media entities/ancillary links; video node numbers
+		change when metadata nodes are registered. This node supports
+		MMAP streaming only. Start its queue before the image stream,
+		and drain it alongside image buffers. It never starts sensors
+		or controls the image stream. Stop both queues per session.
+
+		QCFT is the port-local fourcc defined in
+		linux/qcom-camss-timing.h. A payload is one native-endian,
+		216-byte qcom_camss_frame_timing version 2 record with identical
+		ARM32/ARM64 field layout. Reserved fields are zero. Metadata
+		sequence and timestamp mirror the associated image buffer's
+		sequence and MONOTONIC EOF timestamp (metadata retains ns;
+		V4L2 timeval has microsecond precision). The image's format,
+		stride and payload are unchanged. Buffer index and software
+		enqueue cookie are included; neither is a sensor frame number.
+
+		stream_id is a nonzero generation incremented at each attempted
+		image STREAMON, local to this node and module lifetime. Join
+		image and metadata by stream session and image_sequence, and
+		check image_buffer_index. Drain/stop metadata between sessions;
+		do not join a restarted image stream to old queued metadata.
+		The CSID/RDI identify the configured route, not a hard-coded
+		physical sensor. Resolve the active media graph to obtain the
+		board slot. Sequence numbers need not match across cameras.
+
+		Raw SOF/EOF are 19.2MHz QTimer CSI packet events. The separate
+		DMA header selects the exact retained SOF/EOF pair for this
+		image. VALID requires a nonzero matched header, valid EOF
+		progress and a clock-read bracket below 5000 ns. Otherwise the
+		metadata buffer is ERROR and mapped SOF/EOF fields are zero.
+		The caller must reject ERROR image or metadata buffers, missing
+		VALID, nonzero lookup_status or missing/mismatched records.
+		The first four header words are preserved uninterpreted apart
+		from SOF; their other fields are not promised sensor counters.
+
+		CLOCK_SNAPSHOT indicates ktime_get_snapshot_id(CLOCK_MONOTONIC)
+		returned a valid ARM_ARCH_COUNTER sample: sample_qtimer and
+		sample_monotonic_ns refer to the exact same clocksource read,
+		protected by the timekeeper sequence. clock_bracket_ns is zero
+		for this exact pair; it is not a measurement of call duration.
+		The BOOTTIME offset is read before/after and must be unchanged.
+		An invalid snapshot, different clocksource or changed offset
+		clears CLOCK_SNAPSHOT and VALID and sets clock_bracket_ns to
+		UINT_MAX. No delayed read is accepted by widening a bound.
+		Older producers without CLOCK_SNAPSHOT used a MONOTONIC
+		read bracket below 5000 ns and its midpoint. Consumers can
+		accept either provenance with the same strict validity checks.
+		Each event maps as sample_ns minus
+		floor((sample_qtimer - event_qtimer)*10000/192), then uses the
+		same kernel BOOTTIME offset. Clock pairing does not establish
+		physical sensor accuracy or exposure latency. BOOTTIME values
+		already include suspended time: do not add a second native-sensor
+		QTimer offset. Suspend recovery is not validated. No timestamp
+		field claims to be exposure start or midpoint.
+
+		If no metadata buffer is queued, image capture continues.
+		metadata_dropped counts these omissions while the metadata
+		queue is streaming, modulo 32 bits, reset on image STREAMON.
+		Missing records are never synthesized or reused. Consumer
+		backpressure on this queue does not stall the image stream.
+		Version 2 appends 56 bytes to the original 160-byte prefix,
+		with the original reserved words still zero. PATTERN_ACTIVE
+		indicates frame scheduling; EXPOSURE_VALID requires exact
+		header/SOF matching and a successful sensor group launch for
+		this target frame. exposure_status reports the scheduling result
+		(zero or negative errno). Without EXPOSURE_VALID do not use the appended
+		exposure or phase for tracking. CSI SOF remains a packet time.
+
+		sensor_sequence is the low 32 bits of an internal 64-bit SOF
+		IRQ count, independent of image_sequence. exposure_phase is
+		computed internally before truncation. exposure_ns is derived
+		from programmed integration lines and the sensor pixel clock.
+		control_apply_sof_qtimer is the source SOF two frames before
+		the target; control_applied_boottime_ns is group completion.
+		phase_anchor_sof_qtimer identifies the actual reference frame.
+
+What:		/dev/v4l-subdev* (A081 SM8250 CSID), VIDIOC_QCOM_CAMSS_EXPOSURE_PATTERN
+Date:		October 2026
+Contact:	A081 mainline port
+Description:
+		Explicit 88-byte version-1 pattern ioctl. Disabled by default.
+		Only supported with a running, single-RDI OV7251 pipeline.
+		Three steps specify integration lines, analogue gain and an
+		identical frame length. All reserved fields must be zero.
+		Before arm, match four real QCFT hardware SOFs from the same
+		physical frame, then pass each sensor its own exact anchor SOF
+		and a common phase_at_anchor. The anchor must still exist in
+		that stream's 64-frame history. Future timestamps and guessed
+		video sequence offsets are not accepted.
+
+		period_qtimer is checked against eight recent hardware SOF
+		intervals. All intervals and the supplied period must lie
+		within 5 percent of their median; the kernel then uses that
+		measured median. An unstable history returns EAGAIN, a wrong
+		period ERANGE, and an expired/missing anchor ESTALE.
+
+		A real SOF wakes sleepable CCI work for target frame +2, matching
+		the original Android CRM sensor pipeline delay. Each CSID has a
+		dedicated high-priority unbound workqueue, preserving per-sensor
+		serialization while allowing four CCI requests to progress away
+		from the shared IRQ CPU. No timer drives the pattern. The worker must complete before the next SOF;
+		missing/coalesced IRQs, late completion or I2C errors latch
+		invalid exposure metadata until disable/rearm or stream restart.
+		The initial two-frame pipeline has invalid exposure metadata.
+		E/G/VBLANK are owned by the scheduler while active. Sensor group
+		operations use an internal subdevice command, not a user ioctl.
+		Disable releases ownership but does not restore a static exposure;
+		configure static controls explicitly or stop the image stream.
+		A real sensor I2C group error additionally requires power-on reset.

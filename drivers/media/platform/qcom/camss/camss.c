@@ -4798,6 +4798,14 @@ static int camss_parse_ports(struct camss *camss)
 
 	fwnode_graph_for_each_endpoint(fwnode, ep) {
 		struct camss_async_subdev *csd;
+		struct fwnode_handle *remote;
+		bool available;
+
+		remote = fwnode_graph_get_remote_port_parent(ep);
+		available = !remote || fwnode_device_is_available(remote);
+		fwnode_handle_put(remote);
+		if (!available)
+			continue;
 
 		csd = v4l2_async_nf_add_fwnode_remote(&camss->notifier, ep,
 						      typeof(*csd));

@@ -8,24 +8,33 @@
  * Copyright (C) 2015-2018 Linaro Ltd.
  */
 #include <linux/clk.h>
+#include <clocksource/arm_arch_timer.h>
 #include <linux/completion.h>
+#include <linux/dma-mapping.h>
 #include <linux/interrupt.h>
 #include <linux/iommu.h>
 #include <linux/mutex.h>
+#include <linux/moduleparam.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_domain.h>
 #include <linux/pm_runtime.h>
 #include <linux/spinlock_types.h>
 #include <linux/spinlock.h>
+#include <linux/timekeeping.h>
 #include <media/media-entity.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-subdev.h>
 
 #include "camss-vfe.h"
+#include "camss-exposure.h"
 #include "camss.h"
 
 #define MSM_VFE_NAME "msm_vfe"
+
+static bool timestamp_debug;
+module_param(timestamp_debug, bool, 0600);
+MODULE_PARM_DESC(timestamp_debug, "Log CSID hardware frame timestamps for synchronization diagnosis");
 
 /* VFE reset timeout */
 #define VFE_RESET_TIMEOUT_MS 50
@@ -442,6 +451,119 @@ u32 vfe_hw_version(struct vfe_device *vfe)
 	return hw_version;
 }
 
+/* Timestamp the received frame end, not its delayed DMA completion IRQ.
+ * This deliberately retains V4L2's EOF source flag: CSI SOF is NOT sensor
+ * exposure start. SOF is logged separately for board synchronization work.
+ */
+static bool vfe_frame_timestamp(struct vfe_line *line, struct camss_buffer *buf,
+				u64 *timestamp)
+{
+	struct csid_device *csid = line->timestamp_csid;
+	struct qcom_camss_frame_timing *record = &buf->timing;
+	u64 sof = 0, eof = 0, period = 0, header_sof = 0;
+	struct system_time_snapshot snapshot = { 0 };
+	u64 ticks, mono, boot_offset, offset_after, sof_delta, eof_delta;
+	bool clock_valid;
+	u32 header[4] = { 0 };
+	bool valid;
+	int i, ret;
+
+	memset(record, 0, sizeof(*record));
+	record->version = QCOM_CAMSS_TIMING_VERSION;
+	record->length = sizeof(*record);
+	record->lookup_status = -ENODATA;
+	if (!csid)
+		return true;
+
+	if (buf->frame_header) {
+		/* VFE480 writes a 56-bit SOF counter into this buffer's header.
+		 * The low byte and remaining words are not a documented frame ID.
+		 */
+		dma_rmb();
+		for (i = 0; i < ARRAY_SIZE(header); i++)
+			header[i] = le32_to_cpu(READ_ONCE(buf->frame_header[i]));
+		header_sof = (u64)header[1] << 24 | header[0] >> 8;
+		record->flags |= QCOM_CAMSS_TIMING_HEADER_PRESENT;
+	}
+
+	ret = csid->res->hw_ops->get_timestamps(csid, line->id,
+					     header_sof, &sof, &eof, &period);
+
+	/* The timekeeper derives systime from this exact clocksource sample.
+	 * A seqcount retry may delay the call, but cannot separate the pair.
+	 * BOOTTIME's suspend offset is only accepted if it stayed unchanged.
+	 */
+	boot_offset = ktime_to_ns(ktime_mono_to_any(0, TK_OFFS_BOOT));
+	ktime_get_snapshot_id(CLOCK_MONOTONIC, &snapshot);
+	offset_after = ktime_to_ns(ktime_mono_to_any(0, TK_OFFS_BOOT));
+	clock_valid = snapshot.valid && snapshot.cs_id == CSID_ARM_ARCH_COUNTER &&
+		boot_offset == offset_after;
+	ticks = snapshot.cycles;
+	mono = ktime_to_ns(snapshot.systime);
+	if (clock_valid)
+		record->flags |= QCOM_CAMSS_TIMING_CLOCK_SNAPSHOT;
+	/* Exact VFE/CSID SOF equality was observed in bounded A081 capture.
+	 * Reject any frame that does not satisfy it; never infer exposure start.
+	 */
+	valid = clock_valid && !ret && (!buf->frame_header || header_sof) &&
+		ticks >= eof && ticks - sof < 19200000 &&
+		(!line->last_eof || (eof > line->last_eof &&
+		 eof - line->last_eof < period + period / 2));
+	if (valid) {
+		sof_delta = mul_u64_u32_div(ticks - sof, 10000, 192);
+		eof_delta = mul_u64_u32_div(ticks - eof, 10000, 192);
+		valid = mono >= sof_delta;
+		if (valid)
+			*timestamp = mono - eof_delta;
+	}
+
+	record->csid = csid->id;
+	record->rdi = line->id;
+	record->sof_qtimer = sof;
+	record->eof_qtimer = eof;
+	record->sample_qtimer = ticks;
+	record->sample_monotonic_ns = mono;
+	record->sample_boottime_ns = mono + boot_offset;
+	record->qtimer_frequency_hz = 19200000;
+	/* Zero is exact same-cycle pairing, not the duration of this call. */
+	record->clock_bracket_ns = clock_valid ? 0 : U32_MAX;
+	record->lookup_status = ret;
+	memcpy(record->header_words, header, sizeof(header));
+	if (!ret && header_sof && header_sof == sof)
+		record->flags |= QCOM_CAMSS_TIMING_HEADER_MATCHED;
+	/* Never publish a current-register guess as per-buffer metadata. */
+	if (valid && (record->flags & QCOM_CAMSS_TIMING_HEADER_MATCHED)) {
+		record->flags |= QCOM_CAMSS_TIMING_VALID;
+		record->sof_monotonic_ns = mono - sof_delta;
+		record->eof_monotonic_ns = mono - eof_delta;
+		record->sof_boottime_ns = record->sof_monotonic_ns + boot_offset;
+		record->eof_boottime_ns = record->eof_monotonic_ns + boot_offset;
+	}
+	camss_exposure_lookup(csid, sof, record);
+	if (!ret)
+		line->last_eof = eof;
+	if (READ_ONCE(timestamp_debug))
+		dev_info(csid->camss->dev,
+		"frame csid=%u rdi=%u seq=%u sof=%llu eof=%llu qtimer=%llu mono=%llu valid=%u buffer=%u cookie=%u header_sof=%llu hdr=%08x:%08x:%08x:%08x bracket=%u lookup=%d\n",
+		csid->id, line->id, line->output.sequence, sof, eof, ticks, mono,
+		valid, buf->vb.vb2_buf.index, buf->frame_header_cookie, header_sof,
+		header[0], header[1], header[2], header[3], record->clock_bracket_ns, ret);
+	return valid;
+}
+
+static void vfe_update_buffer(struct vfe_line *line, struct camss_buffer *buf)
+{
+	struct vfe_device *vfe = to_vfe(line);
+	const struct vfe_hw_ops *ops = vfe->res->hw_ops;
+	u8 wm = line->output.wm_idx[0];
+
+	buf->frame_header_cookie = line->output.enqueue_sequence++;
+	if (ops->vfe_wm_update_header)
+		ops->vfe_wm_update_header(vfe, wm, buf);
+	ops->vfe_wm_update(vfe, wm, buf->addr[0], line);
+	ops->reg_update(vfe, line->id);
+}
+
 /*
  * vfe_buf_done - Process write master done interrupt
  * @vfe: VFE Device
@@ -449,13 +571,13 @@ u32 vfe_hw_version(struct vfe_device *vfe)
  */
 void vfe_buf_done(struct vfe_device *vfe, int wm)
 {
-	struct vfe_line *line = &vfe->line[vfe->wm_output_map[wm]];
-	const struct vfe_hw_ops *ops = vfe->res->hw_ops;
+	struct vfe_line *line;
 	struct camss_buffer *ready_buf;
 	struct vfe_output *output;
 	unsigned long flags;
 	u32 index;
 	u64 ts = ktime_get_ns();
+	enum vb2_buffer_state state = VB2_BUF_STATE_DONE;
 
 	spin_lock_irqsave(&vfe->output_lock, flags);
 
@@ -464,7 +586,8 @@ void vfe_buf_done(struct vfe_device *vfe, int wm)
 				    "Received wm done for unmapped index\n");
 		goto out_unlock;
 	}
-	output = &vfe->line[vfe->wm_output_map[wm]].output;
+	line = &vfe->line[vfe->wm_output_map[wm]];
+	output = &line->output;
 
 	ready_buf = output->buf[0];
 	if (!ready_buf) {
@@ -473,8 +596,11 @@ void vfe_buf_done(struct vfe_device *vfe, int wm)
 		goto out_unlock;
 	}
 
+	if (!vfe_frame_timestamp(line, ready_buf, &ts))
+		state = VB2_BUF_STATE_ERROR;
 	ready_buf->vb.vb2_buf.timestamp = ts;
 	ready_buf->vb.sequence = output->sequence++;
+	camss_timing_buffer_done(&line->video_out, ready_buf);
 
 	index = 0;
 	output->buf[0] = output->buf[1];
@@ -484,17 +610,14 @@ void vfe_buf_done(struct vfe_device *vfe, int wm)
 	output->buf[index] = vfe_buf_get_pending(output);
 
 	if (output->buf[index]) {
-		ops->vfe_wm_update(vfe, output->wm_idx[0],
-				   output->buf[index]->addr[0],
-				   line);
-		ops->reg_update(vfe, line->id);
+		vfe_update_buffer(line, output->buf[index]);
 	} else {
 		output->gen2.active_num--;
 	}
 
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
 
-	vb2_buffer_done(&ready_buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
+	vb2_buffer_done(&ready_buf->vb.vb2_buf, state);
 
 	return;
 
@@ -540,6 +663,7 @@ int vfe_enable_output_v2(struct vfe_line *line)
 	output->state = VFE_OUTPUT_ON;
 
 	output->sequence = 0;
+	output->enqueue_sequence = 0;
 	output->wait_reg_update = 0;
 	reinit_completion(&output->reg_update);
 
@@ -550,9 +674,7 @@ int vfe_enable_output_v2(struct vfe_line *line)
 		if (!output->buf[i])
 			break;
 		output->gen2.active_num++;
-		ops->vfe_wm_update(vfe, output->wm_idx[0],
-				   output->buf[i]->addr[0], line);
-		ops->reg_update(vfe, line->id);
+		vfe_update_buffer(line, output->buf[i]);
 	}
 
 	spin_unlock_irqrestore(&vfe->output_lock, flags);
@@ -575,7 +697,6 @@ int vfe_queue_buffer_v2(struct camss_video *vid,
 {
 	struct vfe_line *line = container_of(vid, struct vfe_line, video_out);
 	struct vfe_device *vfe = to_vfe(line);
-	const struct vfe_hw_ops *ops = vfe->res->hw_ops;
 	struct vfe_output *output;
 	unsigned long flags;
 
@@ -586,9 +707,7 @@ int vfe_queue_buffer_v2(struct camss_video *vid,
 	if (output->state == VFE_OUTPUT_ON &&
 	    output->gen2.active_num < 2) {
 		output->buf[output->gen2.active_num++] = buf;
-		ops->vfe_wm_update(vfe, output->wm_idx[0],
-				   buf->addr[0], line);
-		ops->reg_update(vfe, line->id);
+		vfe_update_buffer(line, buf);
 	} else {
 		vfe_buf_add_pending(output, buf);
 	}
@@ -609,6 +728,20 @@ int vfe_enable_v2(struct vfe_line *line)
 	struct vfe_device *vfe = to_vfe(line);
 	const struct vfe_hw_ops *ops = vfe->res->hw_ops;
 	int ret;
+
+	line->timestamp_csid = NULL;
+	line->last_eof = 0;
+	if (vfe->camss->res->version == CAMSS_8250) {
+		struct media_pad *pad;
+		u8 id = 0xff;
+
+		pad = media_pad_remote_pad_first(&line->pads[MSM_VFE_PAD_SINK]);
+		if (pad)
+			msm_csid_get_csid_id(pad->entity, &id);
+		if (id < vfe->camss->res->csid_num &&
+		    vfe->camss->csid[id].res->hw_ops->get_timestamps)
+			line->timestamp_csid = &vfe->camss->csid[id];
+	}
 
 	mutex_lock(&vfe->stream_lock);
 
@@ -2117,6 +2250,8 @@ int msm_vfe_register_entities(struct vfe_device *vfe,
 
 		video_out->nformats = vfe->line[i].nformats;
 		video_out->formats = vfe->line[i].formats;
+		video_out->timing_supported = vfe->camss->res->version == CAMSS_8250 &&
+			(i != VFE_LINE_PIX || vfe->res->is_lite);
 
 		snprintf(name, ARRAY_SIZE(name), "%s%d_%s%d",
 			 MSM_VFE_NAME, vfe->id, "video", i);

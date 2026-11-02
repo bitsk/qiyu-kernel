@@ -16,6 +16,21 @@ properties:
   compatible:
     const: qcom,sm8250-camss
 
+  qcom,controller-phase-gpios:
+    minItems: 2
+    maxItems: 2
+    description:
+      C1 and C2 outputs to the tracking controller MCU, in that order. They
+      identify the hand associated with the next common camera FSIN. Levels
+      10 select the right hand, 01 the left hand, and 00 neither hand.
+
+  qcom,controller-phase-csid:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    maximum: 3
+    description:
+      Index of the single CSID whose SOF updates the shared controller phase
+      GPIOs. Other CSIDs do not drive these lines.
+
   clocks:
     minItems: 37
     maxItems: 37
@@ -316,6 +331,12 @@ required:
   - reg-names
   - vdda-phy-supply
   - vdda-pll-supply
+
+dependencies:
+  qcom,controller-phase-gpios:
+    - qcom,controller-phase-csid
+  qcom,controller-phase-csid:
+    - qcom,controller-phase-gpios
 
 additionalProperties: false
 

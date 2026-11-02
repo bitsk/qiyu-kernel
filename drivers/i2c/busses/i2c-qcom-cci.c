@@ -4,13 +4,18 @@
 
 #include <linux/clk.h>
 #include <linux/completion.h>
+#include <linux/debugfs.h>
 #include <linux/i2c.h>
 #include <linux/io.h>
 #include <linux/interrupt.h>
+#include <linux/kernel.h>
+#include <linux/ktime.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <linux/seq_file.h>
+#include <linux/spinlock.h>
 
 #define CCI_HW_VERSION				0x0
 #define CCI_RESET_CMD				0x004
@@ -104,6 +109,20 @@ struct hw_params {
 
 struct cci;
 
+#define CCI_TIMING_RECORDS 16
+#define CCI_SLOW_QUEUE_NS (4 * NSEC_PER_MSEC)
+
+struct cci_queue_timing {
+	u64 sequence;
+	u64 start_ns;
+	u64 irq_ns;
+	u64 return_ns;
+	u32 irq_status;
+	u32 words;
+	u32 queue;
+	int result;
+};
+
 struct cci_master {
 	struct i2c_adapter adap;
 	u16 master;
@@ -111,6 +130,13 @@ struct cci_master {
 	int status;
 	struct completion irq_complete;
 	struct cci *cci;
+	u64 timing_sequence;
+	u64 irq_ns;
+	u32 irq_status;
+	spinlock_t timing_lock;
+	struct cci_queue_timing timing[CCI_TIMING_RECORDS];
+	struct cci_queue_timing worst_timing;
+	u64 timing_count;
 };
 
 struct cci_data {
@@ -130,36 +156,93 @@ struct cci {
 	struct cci_master master[NUM_MASTERS];
 };
 
+static void cci_timing_print(struct seq_file *s, unsigned int master,
+			     const char *kind, const struct cci_queue_timing *t)
+{
+	seq_printf(s, "master=%u kind=%s sequence=%llu queue=%u words=%u start_ns=%llu irq_ns=%llu return_ns=%llu irq_status=%#x result=%d\n",
+		   master, kind, t->sequence, t->queue, t->words, t->start_ns,
+		   t->irq_ns, t->return_ns, t->irq_status, t->result);
+}
+
+static int cci_timing_show(struct seq_file *s, void *unused)
+{
+	struct cci *cci = s->private;
+	struct cci_queue_timing records[CCI_TIMING_RECORDS], worst;
+	unsigned long flags;
+	u64 count, first, n;
+	unsigned int i;
+
+	seq_printf(s, "clock=MONOTONIC slow_queue_ns=%llu records_per_master=%u\n",
+		   (u64)CCI_SLOW_QUEUE_NS, CCI_TIMING_RECORDS);
+	for (i = 0; i < cci->data->num_masters; i++) {
+		struct cci_master *m = &cci->master[i];
+
+		if (!m->cci)
+			continue;
+		spin_lock_irqsave(&m->timing_lock, flags);
+		count = m->timing_count;
+		worst = m->worst_timing;
+		memcpy(records, m->timing, sizeof(records));
+		spin_unlock_irqrestore(&m->timing_lock, flags);
+		seq_printf(s, "master=%u slow_or_error_count=%llu adapter=%d\n",
+			   i, count, m->adap.nr);
+		first = count > CCI_TIMING_RECORDS ? count - CCI_TIMING_RECORDS : 0;
+		for (n = first; n < count; n++)
+			cci_timing_print(s, i, "recent", &records[n % CCI_TIMING_RECORDS]);
+		if (worst.sequence)
+			cci_timing_print(s, i, "worst", &worst);
+	}
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(cci_timing);
+
+static void cci_timing_remove(void *directory)
+{
+	debugfs_remove_recursive(directory);
+}
+
+static void cci_complete(struct cci_master *master, u32 status, u64 now)
+{
+	WRITE_ONCE(master->irq_ns, now);
+	WRITE_ONCE(master->irq_status, READ_ONCE(master->irq_status) | status);
+	complete(&master->irq_complete);
+}
+
 static irqreturn_t cci_isr(int irq, void *dev)
 {
 	struct cci *cci = dev;
+	u64 irq_ns;
 	u32 val, reset = 0;
 	int ret = IRQ_NONE;
 
 	val = readl(cci->base + CCI_IRQ_STATUS_0);
+	irq_ns = ktime_get_ns();
 	writel(val, cci->base + CCI_IRQ_CLEAR_0);
 	writel(0x1, cci->base + CCI_IRQ_GLOBAL_CLEAR_CMD);
 
 	if (val & CCI_IRQ_STATUS_0_RST_DONE_ACK) {
-		complete(&cci->master[0].irq_complete);
+		cci_complete(&cci->master[0], val, irq_ns);
 		if (cci->master[1].master)
-			complete(&cci->master[1].irq_complete);
+			cci_complete(&cci->master[1], val, irq_ns);
 		ret = IRQ_HANDLED;
 	}
 
-	if (val & CCI_IRQ_STATUS_0_I2C_M0_RD_DONE ||
-			val & CCI_IRQ_STATUS_0_I2C_M0_Q0_REPORT ||
-			val & CCI_IRQ_STATUS_0_I2C_M0_Q1_REPORT) {
+	/* An error completes only after the halt/reset path below. */
+	if (!(val & CCI_IRQ_STATUS_0_I2C_M0_ERROR) &&
+	    (val & CCI_IRQ_STATUS_0_I2C_M0_RD_DONE ||
+	     val & CCI_IRQ_STATUS_0_I2C_M0_Q0_REPORT ||
+	     val & CCI_IRQ_STATUS_0_I2C_M0_Q1_REPORT)) {
 		cci->master[0].status = 0;
-		complete(&cci->master[0].irq_complete);
+		cci_complete(&cci->master[0], val, irq_ns);
 		ret = IRQ_HANDLED;
 	}
 
-	if (val & CCI_IRQ_STATUS_0_I2C_M1_RD_DONE ||
-			val & CCI_IRQ_STATUS_0_I2C_M1_Q0_REPORT ||
-			val & CCI_IRQ_STATUS_0_I2C_M1_Q1_REPORT) {
+	if (!(val & CCI_IRQ_STATUS_0_I2C_M1_ERROR) &&
+	    (val & CCI_IRQ_STATUS_0_I2C_M1_RD_DONE ||
+	     val & CCI_IRQ_STATUS_0_I2C_M1_Q0_REPORT ||
+	     val & CCI_IRQ_STATUS_0_I2C_M1_Q1_REPORT)) {
 		cci->master[1].status = 0;
-		complete(&cci->master[1].irq_complete);
+		cci_complete(&cci->master[1], val, irq_ns);
 		ret = IRQ_HANDLED;
 	}
 
@@ -177,6 +260,8 @@ static irqreturn_t cci_isr(int irq, void *dev)
 		writel(reset, cci->base + CCI_RESET_CMD);
 
 	if (unlikely(val & CCI_IRQ_STATUS_0_I2C_M0_ERROR)) {
+		WRITE_ONCE(cci->master[0].irq_status,
+			   READ_ONCE(cci->master[0].irq_status) | val);
 		if (val & CCI_IRQ_STATUS_0_I2C_M0_Q0_NACK_ERR ||
 			val & CCI_IRQ_STATUS_0_I2C_M0_Q1_NACK_ERR)
 			cci->master[0].status = -ENXIO;
@@ -188,6 +273,8 @@ static irqreturn_t cci_isr(int irq, void *dev)
 	}
 
 	if (unlikely(val & CCI_IRQ_STATUS_0_I2C_M1_ERROR)) {
+		WRITE_ONCE(cci->master[1].irq_status,
+			   READ_ONCE(cci->master[1].irq_status) | val);
 		if (val & CCI_IRQ_STATUS_0_I2C_M1_Q0_NACK_ERR ||
 			val & CCI_IRQ_STATUS_0_I2C_M1_Q1_NACK_ERR)
 			cci->master[1].status = -ENXIO;
@@ -290,24 +377,45 @@ static int cci_reset(struct cci *cci)
 
 static int cci_run_queue(struct cci *cci, u8 master, u8 queue)
 {
+	struct cci_master *m = &cci->master[master];
+	struct cci_queue_timing sample = { .queue = queue };
+	unsigned long flags, completed;
 	u32 val;
 
 	val = readl(cci->base + CCI_I2C_Mm_Qn_CUR_WORD_CNT(master, queue));
+	sample.words = val;
 	writel(val, cci->base + CCI_I2C_Mm_Qn_EXEC_WORD_CNT(master, queue));
 
 	reinit_completion(&cci->master[master].irq_complete);
+	WRITE_ONCE(m->irq_ns, 0);
+	WRITE_ONCE(m->irq_status, 0);
+	sample.sequence = ++m->timing_sequence;
 	val = BIT(master * 2 + queue);
+	sample.start_ns = ktime_get_ns();
 	writel(val, cci->base + CCI_QUEUE_START);
 
-	if (!wait_for_completion_timeout(&cci->master[master].irq_complete,
-					 CCI_TIMEOUT)) {
+	completed = wait_for_completion_timeout(&m->irq_complete, CCI_TIMEOUT);
+	sample.return_ns = ktime_get_ns();
+	sample.irq_ns = READ_ONCE(m->irq_ns);
+	sample.irq_status = READ_ONCE(m->irq_status);
+	sample.result = completed ? m->status : -ETIMEDOUT;
+	/* Retain bounded diagnostics only; printk would consume frame budget. */
+	if (sample.result || sample.return_ns - sample.start_ns >= CCI_SLOW_QUEUE_NS) {
+		spin_lock_irqsave(&m->timing_lock, flags);
+		m->timing[m->timing_count++ % CCI_TIMING_RECORDS] = sample;
+		if (sample.return_ns - sample.start_ns >
+		    m->worst_timing.return_ns - m->worst_timing.start_ns)
+			m->worst_timing = sample;
+		spin_unlock_irqrestore(&m->timing_lock, flags);
+	}
+	if (!completed) {
 		dev_err(cci->dev, "master %d queue %d timeout\n",
 			master, queue);
 		cci_reset(cci);
 		return -ETIMEDOUT;
 	}
 
-	return cci->master[master].status;
+	return sample.result;
 }
 
 static int cci_validate_queue(struct cci *cci, u8 master, u8 queue)
@@ -380,29 +488,21 @@ static int cci_i2c_read(struct cci *cci, u16 master,
 	return 0;
 }
 
-static int cci_i2c_write(struct cci *cci, u16 master,
-			 u16 addr, u8 *buf, u16 len)
+static void cci_i2c_queue_write(struct cci *cci, u16 master,
+				const struct i2c_msg *msg)
 {
 	u8 queue = QUEUE_0;
 	u8 load[12] = { 0 };
-	int i = 0, j, ret;
+	int i = 0, j;
 	u32 val;
 
-	/*
-	 * Call validate queue to make sure queue is empty before starting.
-	 * This is to avoid overflow / underflow of queue.
-	 */
-	ret = cci_validate_queue(cci, master, queue);
-	if (ret < 0)
-		return ret;
-
-	val = CCI_I2C_SET_PARAM | (addr & 0x7f) << 4;
+	val = CCI_I2C_SET_PARAM | (msg->addr & 0x7f) << 4;
 	writel(val, cci->base + CCI_I2C_Mm_Qn_LOAD_DATA(master, queue));
 
-	load[i++] = CCI_I2C_WRITE | len << 4;
+	load[i++] = CCI_I2C_WRITE | msg->len << 4;
 
-	for (j = 0; j < len; j++)
-		load[i++] = buf[j];
+	for (j = 0; j < msg->len; j++)
+		load[i++] = msg->buf[j];
 
 	for (j = 0; j < i; j += 4) {
 		val = load[j];
@@ -411,9 +511,37 @@ static int cci_i2c_write(struct cci *cci, u16 master,
 		val |= load[j + 3] << 24;
 		writel(val, cci->base + CCI_I2C_Mm_Qn_LOAD_DATA(master, queue));
 	}
+}
 
-	val = CCI_I2C_REPORT | CCI_I2C_REPORT_IRQ_EN;
-	writel(val, cci->base + CCI_I2C_Mm_Qn_LOAD_DATA(master, queue));
+static int cci_i2c_write(struct cci *cci, u16 master,
+			struct i2c_msg *msgs, int num)
+{
+	u8 queue = QUEUE_0;
+	u32 report = CCI_I2C_REPORT | CCI_I2C_REPORT_IRQ_EN;
+	unsigned int queued = 0, words;
+	int i, ret;
+
+	ret = cci_validate_queue(cci, master, queue);
+	if (ret < 0)
+		return ret;
+
+	for (i = 0; i < num; i++) {
+		/* SET_PARAM, the padded WRITE command, and one final REPORT. */
+		words = 1 + DIV_ROUND_UP(msgs[i].len + 1, 4);
+		if (queued + words + 1 > cci->data->queue_size[queue]) {
+			writel(report, cci->base +
+			       CCI_I2C_Mm_Qn_LOAD_DATA(master, queue));
+			ret = cci_run_queue(cci, master, queue);
+			if (ret < 0)
+				return ret;
+			queued = 0;
+		}
+
+		cci_i2c_queue_write(cci, master, &msgs[i]);
+		queued += words;
+	}
+
+	writel(report, cci->base + CCI_I2C_Mm_Qn_LOAD_DATA(master, queue));
 
 	return cci_run_queue(cci, master, queue);
 }
@@ -422,21 +550,26 @@ static int cci_xfer(struct i2c_adapter *adap, struct i2c_msg msgs[], int num)
 {
 	struct cci_master *cci_master = i2c_get_adapdata(adap);
 	struct cci *cci = cci_master->cci;
-	int i, ret;
+	int i, count, ret;
 
 	ret = pm_runtime_get_sync(cci->dev);
 	if (ret < 0)
 		goto err;
 
-	for (i = 0; i < num; i++) {
-		if (msgs[i].flags & I2C_M_RD)
+	for (i = 0; i < num; i += count) {
+		count = 1;
+		if (msgs[i].flags & I2C_M_RD) {
 			ret = cci_i2c_read(cci, cci_master->master,
 					   msgs[i].addr, msgs[i].buf,
 					   msgs[i].len);
-		else
+		} else {
+			/* Keep reads and special-message flags on their old path. */
+			if (!msgs[i].flags)
+				while (i + count < num && !msgs[i + count].flags)
+					count++;
 			ret = cci_i2c_write(cci, cci_master->master,
-					    msgs[i].addr, msgs[i].buf,
-					    msgs[i].len);
+					    &msgs[i], count);
+		}
 
 		if (ret < 0)
 			break;
@@ -507,6 +640,8 @@ static int cci_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct resource *r;
 	struct cci *cci;
+	struct dentry *timing;
+	char *timing_name;
 	int ret, i;
 	u32 val;
 
@@ -560,6 +695,7 @@ static int cci_probe(struct platform_device *pdev)
 		}
 
 		init_completion(&master->irq_complete);
+		spin_lock_init(&master->timing_lock);
 	}
 
 	/* Memory */
@@ -615,6 +751,17 @@ static int cci_probe(struct platform_device *pdev)
 		ret = i2c_add_adapter(&cci->master[i].adap);
 		if (ret < 0)
 			goto error_i2c;
+	}
+
+	timing_name = devm_kasprintf(dev, GFP_KERNEL, "cci-timing-%s", dev_name(dev));
+	if (timing_name) {
+		timing = debugfs_create_dir(timing_name, NULL);
+		if (!IS_ERR_OR_NULL(timing)) {
+			debugfs_create_file("slow-queues", 0400, timing, cci, &cci_timing_fops);
+			ret = devm_add_action_or_reset(dev, cci_timing_remove, timing);
+			if (ret)
+				dev_dbg(dev, "optional timing debugfs unavailable: %d\n", ret);
+		}
 	}
 
 	return 0;

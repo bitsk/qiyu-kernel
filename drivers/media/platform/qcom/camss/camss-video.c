@@ -173,7 +173,20 @@ static int video_buf_init(struct vb2_buffer *vb)
 				format->plane_fmt[0].bytesperline *
 				format->height;
 
+	if (video->ops->buffer_init)
+		return video->ops->buffer_init(video, buffer);
+
 	return 0;
+}
+
+static void video_buf_cleanup(struct vb2_buffer *vb)
+{
+	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
+	struct camss_video *video = vb2_get_drv_priv(vb->vb2_queue);
+	struct camss_buffer *buffer = container_of(vbuf, struct camss_buffer, vb);
+
+	if (video->ops->buffer_cleanup)
+		video->ops->buffer_cleanup(video, buffer);
 }
 
 static int video_buf_prepare(struct vb2_buffer *vb)
@@ -268,6 +281,8 @@ static int video_start_streaming(struct vb2_queue *q, unsigned int count)
 	if (ret < 0)
 		goto error;
 
+	camss_timing_begin_stream(video);
+
 	entity = &vdev->entity;
 	while (1) {
 		pad = &entity->pads[0];
@@ -343,6 +358,7 @@ static void video_unprepare_streaming(struct vb2_queue *q)
 static const struct vb2_ops msm_video_vb2_q_ops = {
 	.queue_setup     = video_queue_setup,
 	.buf_init        = video_buf_init,
+	.buf_cleanup     = video_buf_cleanup,
 	.buf_prepare     = video_buf_prepare,
 	.buf_queue       = video_buf_queue,
 	.prepare_streaming = video_prepare_streaming,
@@ -750,6 +766,12 @@ int msm_video_register(struct camss_video *video, struct v4l2_device *v4l2_dev,
 	video_set_drvdata(vdev, video);
 	atomic_inc(&video->camss->ref_count);
 
+	ret = camss_timing_register(video);
+	if (ret) {
+		msm_video_unregister(video);
+		return ret;
+	}
+
 	return 0;
 
 error_video_register:
@@ -764,6 +786,7 @@ error_vb2_init:
 void msm_video_unregister(struct camss_video *video)
 {
 	atomic_inc(&video->camss->ref_count);
+	camss_timing_unregister(video);
 	vb2_video_unregister_device(&video->vdev);
 	atomic_dec(&video->camss->ref_count);
 }

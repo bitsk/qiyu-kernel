@@ -77,13 +77,18 @@ struct vfe_output {
 	};
 	enum vfe_output_state state;
 	unsigned int sequence;
+	u32 enqueue_sequence;
 
 	int wait_reg_update;
 	struct completion sof;
 	struct completion reg_update;
 };
 
+struct csid_device;
+
 struct vfe_line {
+	struct csid_device *timestamp_csid;
+	u64 last_eof;
 	enum vfe_line_id id;
 	struct v4l2_subdev subdev;
 	struct media_pad pads[MSM_VFE_PADS_NUM];
@@ -120,6 +125,8 @@ struct vfe_hw_ops {
 	void (*vfe_buf_done)(struct vfe_device *vfe, int port_id);
 	void (*vfe_wm_update)(struct vfe_device *vfe, u8 wm, u32 addr,
 			      struct vfe_line *line);
+	void (*vfe_wm_update_header)(struct vfe_device *vfe, u8 wm,
+				     struct camss_buffer *buf);
 };
 
 struct vfe_isr_ops {

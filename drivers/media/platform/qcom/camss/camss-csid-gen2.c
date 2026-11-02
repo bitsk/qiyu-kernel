@@ -11,8 +11,10 @@
 #include <linux/io.h>
 #include <linux/kernel.h>
 #include <linux/of.h>
+#include <media/v4l2-event.h>
 
 #include "camss-csid.h"
+#include "camss-exposure.h"
 #include "camss-csid-gen2.h"
 #include "camss.h"
 
@@ -37,6 +39,7 @@
 						 + 0x10 * (rdi))
 #define CSID_CSI2_RDIN_IRQ_SET(rdi)		((csid_is_lite(csid) ? 0x3C : 0x4C) \
 						 + 0x10 * (rdi))
+#define		RDIN_IRQ_INPUT_SOF	BIT(12)
 
 #define CSID_TOP_IRQ_STATUS	0x70
 #define		TOP_IRQ_STATUS_RESET_DONE 0
@@ -339,6 +342,32 @@ static void csid_configure_stream(struct csid_device *csid, u8 enable)
 		}
 }
 
+static void csid_configure_events(struct csid_device *csid, bool enable)
+{
+	unsigned int i;
+
+	WRITE_ONCE(csid->frame_events_enabled, false);
+	for (i = 0; i < MSM_CSID_MAX_SRC_STREAMS; i++)
+		if (csid->phy.en_vc & BIT(i))
+			writel(0, csid->base + CSID_CSI2_RDIN_IRQ_MASK(i));
+	synchronize_irq(csid->irq);
+
+	for (i = 0; i < MSM_CSID_MAX_SRC_STREAMS; i++) {
+		if (!(csid->phy.en_vc & BIT(i)))
+			continue;
+		writel(RDIN_IRQ_INPUT_SOF,
+		       csid->base + CSID_CSI2_RDIN_IRQ_CLEAR(i));
+		csid->frame_sequence[i] = 0;
+	}
+	writel(BIT(IRQ_CMD_CLEAR), csid->base + CSID_IRQ_CMD);
+	WRITE_ONCE(csid->frame_events_enabled, enable);
+	if (enable)
+		for (i = 0; i < MSM_CSID_MAX_SRC_STREAMS; i++)
+			if (csid->phy.en_vc & BIT(i))
+				writel(RDIN_IRQ_INPUT_SOF,
+				       csid->base + CSID_CSI2_RDIN_IRQ_MASK(i));
+}
+
 static int csid_configure_testgen_pattern(struct csid_device *csid, s32 val)
 {
 	if (val > 0 && val <= csid->testgen.nmodes)
@@ -354,9 +383,12 @@ static int csid_configure_testgen_pattern(struct csid_device *csid, s32 val)
  *
  * Return IRQ_HANDLED on success
  */
+static u64 csid_read_timestamp(struct csid_device *csid, u32 offset);
+
 static irqreturn_t csid_isr(int irq, void *dev)
 {
 	struct csid_device *csid = dev;
+	u32 rdi_status[MSM_CSID_MAX_SRC_STREAMS] = { 0 };
 	u32 val;
 	u8 reset_done;
 	int i;
@@ -372,6 +404,7 @@ static irqreturn_t csid_isr(int irq, void *dev)
 	for (i = 0; i < MSM_CSID_MAX_SRC_STREAMS; i++)
 		if (csid->phy.en_vc & BIT(i)) {
 			val = readl_relaxed(csid->base + CSID_CSI2_RDIN_IRQ_STATUS(i));
+			rdi_status[i] = val;
 			writel_relaxed(val, csid->base + CSID_CSI2_RDIN_IRQ_CLEAR(i));
 		}
 
@@ -380,6 +413,24 @@ static irqreturn_t csid_isr(int irq, void *dev)
 
 	if (reset_done)
 		complete(&csid->reset_complete);
+
+	for (i = 0; i < MSM_CSID_MAX_SRC_STREAMS; i++) {
+		struct v4l2_event event = {
+			.type = V4L2_EVENT_FRAME_SYNC,
+		};
+
+		if (!READ_ONCE(csid->frame_events_enabled) ||
+		    !(rdi_status[i] & RDIN_IRQ_INPUT_SOF) ||
+		    hweight8(csid->phy.en_vc) != 1)
+			continue;
+
+		camss_exposure_sof(csid,
+			csid_read_timestamp(csid, CSID_RDI_CFG0(i) + 0x90));
+
+		/* v4l2_event_queue timestamps notification, not hardware SOF. */
+		event.u.frame_sync.frame_sequence = csid->frame_sequence[i]++;
+		v4l2_event_queue(csid->subdev.devnode, &event);
+	}
 
 	return IRQ_HANDLED;
 }
@@ -416,6 +467,53 @@ static int csid_reset(struct csid_device *csid)
 	return 0;
 }
 
+/* Gen2 RDI timestamps use the common 19.2 MHz QTimer. The register
+ * offsets and units match the downstream CSID 170/175/480 definitions.
+ * Keep the EOF and its preceding SOF together even if the next SOF arrived
+ * before the VFE completion IRQ was serviced.
+ */
+static u64 csid_read_timestamp(struct csid_device *csid, u32 offset)
+{
+	u32 hi, lo, again;
+
+	do {
+		hi = readl(csid->base + offset + 4);
+		lo = readl(csid->base + offset);
+		again = readl(csid->base + offset + 4);
+	} while (hi != again);
+
+	return (u64)hi << 32 | lo;
+}
+
+static int csid_get_timestamps(struct csid_device *csid, unsigned int rdi,
+			       u64 match_sof, u64 *sof, u64 *eof, u64 *period)
+{
+	u32 base = CSID_RDI_CFG0(rdi);
+	u64 latest, previous, end, previous_end;
+
+	end = csid_read_timestamp(csid, base + 0xa0);
+	latest = csid_read_timestamp(csid, base + 0x90);
+	previous = csid_read_timestamp(csid, base + 0x98);
+	previous_end = csid_read_timestamp(csid, base + 0xa8);
+	if (end != csid_read_timestamp(csid, base + 0xa0) ||
+	    latest != csid_read_timestamp(csid, base + 0x90) ||
+	    !end || latest <= previous)
+		return -EAGAIN;
+
+	*period = latest - previous;
+	*sof = latest <= end ? latest : previous;
+	*eof = end;
+	if (match_sof && match_sof != *sof) {
+		/* Only the immediately preceding completed frame is retained. */
+		if (match_sof != previous || previous_end <= previous ||
+		    previous_end >= latest)
+			return -EAGAIN;
+		*sof = previous;
+		*eof = previous_end;
+	}
+	return *sof && *sof < *eof ? 0 : -EAGAIN;
+}
+
 static void csid_subdev_init(struct csid_device *csid)
 {
 	csid->testgen.modes = csid_testgen_modes;
@@ -423,6 +521,8 @@ static void csid_subdev_init(struct csid_device *csid)
 }
 
 const struct csid_hw_ops csid_ops_gen2 = {
+	.configure_events = csid_configure_events,
+	.get_timestamps = csid_get_timestamps,
 	.configure_stream = csid_configure_stream,
 	.configure_testgen_pattern = csid_configure_testgen_pattern,
 	.hw_version = csid_hw_version,

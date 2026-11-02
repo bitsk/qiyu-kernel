@@ -23,6 +23,8 @@
 #include <media/v4l2-subdev.h>
 
 #include "camss-csid.h"
+#include "camss-exposure.h"
+#include <linux/qcom-camss-timing.h>
 #include "camss-csid-gen1.h"
 #include "camss.h"
 
@@ -777,6 +779,13 @@ static int csid_set_stream(struct v4l2_subdev *sd, int enable)
 			return -ENOLINK;
 	}
 
+	if (enable)
+		camss_exposure_start(csid);
+	if (csid->res->hw_ops->configure_events)
+		csid->res->hw_ops->configure_events(csid, enable);
+	if (!enable)
+		camss_exposure_stop(csid);
+
 	if (csid->phy.need_vc_update) {
 		csid->res->hw_ops->configure_stream(csid, enable);
 		csid->phy.need_vc_update = false;
@@ -1103,6 +1112,9 @@ int msm_csid_subdev_init(struct camss *camss, struct csid_device *csid,
 	csid->camss = camss;
 	csid->id = id;
 	csid->res = &res->csid;
+	ret = camss_exposure_init(csid);
+	if (ret)
+		return ret;
 
 	if (dev_WARN_ONCE(dev, !csid->res->parent_dev_ops,
 			  "Error: CSID depends on VFE/IFE device ops!\n")) {
@@ -1315,9 +1327,35 @@ static int csid_link_setup(struct media_entity *entity,
 	return 0;
 }
 
+static int csid_subscribe_event(struct v4l2_subdev *sd, struct v4l2_fh *fh,
+				struct v4l2_event_subscription *sub)
+{
+	struct csid_device *csid = v4l2_get_subdevdata(sd);
+
+	if (sub->type != V4L2_EVENT_FRAME_SYNC)
+		return v4l2_ctrl_subdev_subscribe_event(sd, fh, sub);
+
+	/* FRAME_SYNC has no pad selector: require one unambiguous RDI. */
+	if (csid->res->hw_ops != &csid_ops_gen2 || sub->id ||
+	    hweight8(csid->phy.en_vc) > 1)
+		return -EINVAL;
+
+	return v4l2_event_subscribe(fh, sub, 16, NULL);
+}
+
+static long csid_ioctl(struct v4l2_subdev *sd, unsigned int cmd, void *arg)
+{
+	struct csid_device *csid = v4l2_get_subdevdata(sd);
+
+	if (cmd != VIDIOC_QCOM_CAMSS_EXPOSURE_PATTERN)
+		return -ENOIOCTLCMD;
+	return camss_exposure_configure(csid, arg);
+}
+
 static const struct v4l2_subdev_core_ops csid_core_ops = {
+	.ioctl = csid_ioctl,
 	.s_power = csid_set_power,
-	.subscribe_event = v4l2_ctrl_subdev_subscribe_event,
+	.subscribe_event = csid_subscribe_event,
 	.unsubscribe_event = v4l2_event_subdev_unsubscribe,
 };
 
@@ -1434,6 +1472,7 @@ free_ctrl:
  */
 void msm_csid_unregister_entity(struct csid_device *csid)
 {
+	camss_exposure_stop(csid);
 	v4l2_device_unregister_subdev(&csid->subdev);
 	media_entity_cleanup(&csid->subdev.entity);
 	if (csid->testgen.nmodes != CSID_PAYLOAD_MODE_DISABLED)

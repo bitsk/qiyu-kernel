@@ -11,6 +11,7 @@
 #define QC_MSM_CAMSS_VIDEO_H
 
 #include <linux/mutex.h>
+#include <linux/qcom-camss-timing.h>
 #include <linux/videodev2.h>
 #include <media/media-entity.h>
 #include <media/v4l2-dev.h>
@@ -19,15 +20,23 @@
 #include <media/v4l2-mediabus.h>
 #include <media/videobuf2-v4l2.h>
 
+#include "camss-timing.h"
+
 struct camss_buffer {
 	struct vb2_v4l2_buffer vb;
 	dma_addr_t addr[3];
+	__le32 *frame_header;
+	dma_addr_t frame_header_addr;
+	u32 frame_header_cookie;
+	struct qcom_camss_frame_timing timing;
 	struct list_head queue;
 };
 
 struct camss_video;
 
 struct camss_video_ops {
+	int (*buffer_init)(struct camss_video *vid, struct camss_buffer *buf);
+	void (*buffer_cleanup)(struct camss_video *vid, struct camss_buffer *buf);
 	int (*queue_buffer)(struct camss_video *vid, struct camss_buffer *buf);
 	int (*flush_buffers)(struct camss_video *vid,
 			     enum vb2_buffer_state state);
@@ -48,6 +57,8 @@ struct camss_video {
 	unsigned int line_based;
 	const struct camss_format_info *formats;
 	unsigned int nformats;
+	bool timing_supported;
+	struct camss_timing timing;
 };
 
 int msm_video_register(struct camss_video *video, struct v4l2_device *v4l2_dev,

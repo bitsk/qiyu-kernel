@@ -9,11 +9,20 @@
  */
 
 #include <linux/interrupt.h>
+#include <linux/dma-mapping.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
+#include <linux/moduleparam.h>
 
 #include "camss.h"
 #include "camss-vfe.h"
+
+/* Opt in until the image/header FIFO pairing is validated on A081. */
+static bool frame_headers = true;
+module_param(frame_headers, bool, 0444);
+MODULE_PARM_DESC(frame_headers, "Enable SM8250 per-buffer SOF DMA headers and per-buffer timing metadata");
+
+#define VFE_FRAME_HEADER_SIZE	128
 
 #define VFE_GLOBAL_RESET_CMD		(vfe_is_lite(vfe) ? 0x0c : 0x1c)
 #define	    GLOBAL_RESET_HW_AND_REG	(vfe_is_lite(vfe) ? BIT(1) : BIT(0))
@@ -60,6 +69,7 @@ static inline int bus_irq_mask_0_comp_done(struct vfe_device *vfe, int n)
 
 #define VFE_BUS_WM_CFG(n)		(BUS_REG_BASE + 0x200 + (n) * 0x100)
 #define		WM_CFG_EN			(0)
+#define		WM_CFG_FRAME_HEADER_EN		BIT(2)
 #define		WM_CFG_MODE			(16)
 #define			MODE_QCOM_PLAIN	(0)
 #define			MODE_MIPI_RAW	(1)
@@ -138,6 +148,49 @@ static void vfe_wm_update(struct vfe_device *vfe, u8 wm, u32 addr,
 {
 	wm = RDI_WM(wm); /* map to actual WM used (from wm=RDI index) */
 	writel_relaxed(addr, vfe->base + VFE_BUS_WM_IMAGE_ADDR(wm));
+}
+
+static void vfe_wm_update_header(struct vfe_device *vfe, u8 wm,
+				 struct camss_buffer *buf)
+{
+	u32 cfg;
+
+	if (!buf->frame_header)
+		return;
+
+	wm = RDI_WM(wm);
+	memset(buf->frame_header, 0, VFE_FRAME_HEADER_SIZE);
+	/* Clear recycled data before giving the paired header/image to DMA. */
+	dma_wmb();
+	writel_relaxed(buf->frame_header_addr,
+		       vfe->base + VFE_BUS_WM_HEADER_ADDR(wm));
+	writel_relaxed(buf->frame_header_cookie,
+		       vfe->base + VFE_BUS_WM_HEADER_CFG(wm));
+	cfg = readl_relaxed(vfe->base + VFE_BUS_WM_CFG(wm));
+	writel_relaxed(cfg | WM_CFG_FRAME_HEADER_EN,
+		       vfe->base + VFE_BUS_WM_CFG(wm));
+}
+
+static int vfe_buffer_init(struct camss_video *vid, struct camss_buffer *buf)
+{
+	if (!frame_headers || vid->camss->res->version != CAMSS_8250)
+		return 0;
+
+	/* The downstream bus-v3 ABI reserves 128 bytes, aligned to 16. */
+	buf->frame_header = dma_alloc_coherent(vid->camss->dev,
+					     VFE_FRAME_HEADER_SIZE,
+					     &buf->frame_header_addr, GFP_KERNEL);
+	return buf->frame_header ? 0 : -ENOMEM;
+}
+
+static void vfe_buffer_cleanup(struct camss_video *vid, struct camss_buffer *buf)
+{
+	if (!buf->frame_header)
+		return;
+
+	dma_free_coherent(vid->camss->dev, VFE_FRAME_HEADER_SIZE,
+			  buf->frame_header, buf->frame_header_addr);
+	buf->frame_header = NULL;
 }
 
 static void vfe_reg_update(struct vfe_device *vfe, enum vfe_line_id line_id)
@@ -253,6 +306,8 @@ static void vfe_isr_reg_update(struct vfe_device *vfe, enum vfe_line_id line_id)
 }
 
 static const struct camss_video_ops vfe_video_ops_480 = {
+	.buffer_init = vfe_buffer_init,
+	.buffer_cleanup = vfe_buffer_cleanup,
 	.queue_buffer = vfe_queue_buffer_v2,
 	.flush_buffers = vfe_flush_buffers,
 };
@@ -278,6 +333,7 @@ static void vfe_buf_done_480(struct vfe_device *vfe, int port_id)
 }
 
 const struct vfe_hw_ops vfe_ops_480 = {
+	.vfe_wm_update_header = vfe_wm_update_header,
 	.enable_irq = vfe_enable_irq,
 	.global_reset = vfe_global_reset,
 	.hw_version = vfe_hw_version,

@@ -73,8 +73,16 @@ struct csid_phy_config {
 };
 
 struct csid_device;
+struct camss_exposure;
 
 struct csid_hw_ops {
+	/* Start/stop frame notifications on every stream transition. */
+	void (*configure_events)(struct csid_device *csid, bool enable);
+
+	/* Read an RDI frame's QTimer ticks; match SOF when it is nonzero. */
+	int (*get_timestamps)(struct csid_device *csid, unsigned int rdi,
+			      u64 match_sof, u64 *sof, u64 *eof, u64 *period);
+
 	/*
 	 * configure_stream - Configures and starts CSID input stream
 	 * @csid: CSID device
@@ -147,6 +155,7 @@ struct csid_subdev_resources {
 };
 
 struct csid_device {
+	struct camss_exposure *exposure;
 	struct camss *camss;
 	u8 id;
 	struct v4l2_subdev subdev;
@@ -160,6 +169,9 @@ struct csid_device {
 	struct regulator_bulk_data *supplies;
 	int num_supplies;
 	struct completion reset_complete;
+	/* SOF interrupt notifications, not sensor or DMA buffer frame IDs. */
+	u32 frame_sequence[MSM_CSID_MAX_SRC_STREAMS];
+	bool frame_events_enabled;
 	struct csid_testgen_config testgen;
 	bool tpg_linked;
 	struct csid_phy_config phy;
