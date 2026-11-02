@@ -21,6 +21,7 @@
 #include <sound/soc-dapm.h>
 #include <linux/mux/consumer.h>
 #include <linux/regulator/consumer.h>
+#include <linux/workqueue.h>
 
 #include "wcd-clsh-v2.h"
 #include "wcd-common.h"
@@ -145,6 +146,7 @@ static u8 tx_mode_bit[] = {
 };
 
 struct wcd938x_priv {
+	struct work_struct component_work;
 	struct sdw_slave *tx_sdw_dev;
 	struct wcd938x_sdw_priv *sdw_priv[NUM_CODEC_DAIS];
 	struct device *txdev;
@@ -3325,6 +3327,19 @@ static struct snd_soc_dai_driver wcd938x_dais[] = {
 	},
 };
 
+static void wcd938x_register_component(struct work_struct *work)
+{
+	struct wcd938x_priv *wcd938x = container_of(work, struct wcd938x_priv,
+						 component_work);
+	struct device *dev = wcd938x->common.dev;
+	int ret;
+
+	ret = snd_soc_register_component(dev, &soc_codec_dev_wcd938x,
+					 wcd938x_dais, ARRAY_SIZE(wcd938x_dais));
+	if (ret)
+		dev_err(dev, "Codec registration failed: %d\n", ret);
+}
+
 static int wcd938x_bind(struct device *dev)
 {
 	struct wcd938x_priv *wcd938x = dev_get_drvdata(dev);
@@ -3397,13 +3412,12 @@ static int wcd938x_bind(struct device *dev)
 
 	wcd938x_set_micbias_data(dev, wcd938x);
 
-	ret = snd_soc_register_component(dev, &soc_codec_dev_wcd938x,
-					 wcd938x_dais, ARRAY_SIZE(wcd938x_dais));
-	if (ret) {
-		dev_err(dev, "%s: Codec registration failed\n",
-				__func__);
-		goto err_remove_rx_link;
-	}
+	/*
+	 * The last SoundWire slave can call us from its probe. ASoC may
+	 * immediately probe the codec and wait for SoundWire initialization,
+	 * which cannot finish until that slave probe has returned.
+	 */
+	schedule_work(&wcd938x->component_work);
 
 	return 0;
 
@@ -3427,6 +3441,7 @@ static void wcd938x_unbind(struct device *dev)
 {
 	struct wcd938x_priv *wcd938x = dev_get_drvdata(dev);
 
+	cancel_work_sync(&wcd938x->component_work);
 	snd_soc_unregister_component(dev);
 	device_link_remove(dev, wcd938x->txdev);
 	device_link_remove(dev, wcd938x->rxdev);
@@ -3485,6 +3500,7 @@ static int wcd938x_probe(struct platform_device *pdev)
 	mutex_init(&wcd938x->micb_lock);
 	wcd938x->common.dev = dev;
 	wcd938x->common.max_bias = 4;
+	INIT_WORK(&wcd938x->component_work, wcd938x_register_component);
 
 	ret = wcd938x_populate_dt_data(wcd938x, dev);
 	if (ret)
@@ -3496,15 +3512,17 @@ static int wcd938x_probe(struct platform_device *pdev)
 
 	wcd938x_reset(wcd938x);
 
-	ret = component_master_add_with_match(dev, &wcd938x_comp_ops, match);
-	if (ret)
-		return ret;
-
 	pm_runtime_set_autosuspend_delay(dev, 1000);
 	pm_runtime_use_autosuspend(dev);
 	pm_runtime_mark_last_busy(dev);
 	pm_runtime_set_active(dev);
 	pm_runtime_enable(dev);
+	ret = component_master_add_with_match(dev, &wcd938x_comp_ops, match);
+	if (ret) {
+		pm_runtime_disable(dev);
+		pm_runtime_set_suspended(dev);
+		return ret;
+	}
 	pm_runtime_idle(dev);
 
 	return 0;

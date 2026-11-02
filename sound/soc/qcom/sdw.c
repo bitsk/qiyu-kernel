@@ -69,9 +69,20 @@ int qcom_snd_sdw_startup(struct snd_pcm_substream *substream)
 	struct sdw_stream_runtime *sruntime;
 	struct snd_soc_dai *codec_dai;
 	u32 rx_ch_cnt = 0, tx_ch_cnt = 0;
+	bool has_sdw_codec = false;
 	int ret, i, j;
 
 	if (!qcom_snd_is_sdw_dai(cpu_dai->id))
+		return 0;
+
+	/* A CDC DMA port can also capture directly from LPASS DMICs. */
+	for_each_rtd_codec_dais(rtd, i, codec_dai) {
+		if (codec_dai->driver->ops->set_stream) {
+			has_sdw_codec = true;
+			break;
+		}
+	}
+	if (!has_sdw_codec)
 		return 0;
 
 	sruntime = sdw_alloc_stream(cpu_dai->name, SDW_STREAM_PCM);
