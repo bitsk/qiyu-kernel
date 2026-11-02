@@ -1886,6 +1886,15 @@ config REGULATOR_WM8994
 	  This driver provides support for the voltage regulators on the
 	  WM8994 CODEC.
 
+config REGULATOR_QCOM_PM8150L_LCDB
+	tristate "Qualcomm PM8150L v3 LCD bias regulators"
+	depends on MFD_SPMI_PMIC && OF
+	help
+	  Control PM8150L v3 positive and negative LCD bias outputs.
+	  Coordinate their shared enable and boost supply, and report
+	  short-circuit faults. Touch wake and external HWEN are not
+	  supported. The initial PMIC configuration is inherited.
+
 config REGULATOR_QCOM_LABIBB
 	tristate "Qualcomm LAB/IBB regulator support"
 	depends on SPMI || COMPILE_TEST

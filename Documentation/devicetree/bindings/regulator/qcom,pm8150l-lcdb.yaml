@@ -1,0 +1,78 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/regulator/qcom,pm8150l-lcdb.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Qualcomm PM8150L LCD bias regulators
+
+maintainers:
+  - Qiyu Project <qiyu@example.invalid>
+
+description: |
+  PM8150L contains a shared boost converter feeding a positive LDO and a
+  negative charge pump for LCD bias. Both outputs share the module enable.
+  The NCP voltage constraints specify the absolute value of its output.
+  The boost is an internal supply, not an independent panel supply output.
+
+properties:
+  compatible:
+    const: qcom,pm8150l-lcdb
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+    description: Short circuit interrupt
+
+  interrupt-names:
+    const: sc-err
+
+  ldo:
+    type: object
+    $ref: regulator.yaml#
+    unevaluatedProperties: false
+
+  ncp:
+    type: object
+    $ref: regulator.yaml#
+    unevaluatedProperties: false
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - interrupt-names
+  - ldo
+  - ncp
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/interrupt-controller/irq.h>
+
+    pmic {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        regulator@ec00 {
+            compatible = "qcom,pm8150l-lcdb";
+            reg = <0xec00>;
+            interrupts = <0x5 0xec 0x1 IRQ_TYPE_EDGE_RISING>;
+            interrupt-names = "sc-err";
+
+            ldo {
+                regulator-name = "lcdb-ldo";
+                regulator-min-microvolt = <5700000>;
+                regulator-max-microvolt = <5900000>;
+            };
+
+            ncp {
+                regulator-name = "lcdb-ncp";
+                regulator-min-microvolt = <5700000>;
+                regulator-max-microvolt = <5900000>;
+            };
+        };
+    };
