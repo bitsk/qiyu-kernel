@@ -28,6 +28,7 @@
 
 /* V_TIMING internal */
 #define IMX471_REG_FLL				CCI_REG16(0x0340)
+#define IMX471_REG_LLP			CCI_REG16(0x0342)
 #define IMX471_FLL_MAX				0xffff
 
 /* Exposure control */
@@ -215,6 +216,7 @@ static const struct cci_reg_sequence imx471_global_regs[] = {
 };
 
 static const struct cci_reg_sequence mode_1928x1088_regs[] = {
+	{ IMX471_REG_LLP, 2328 },
 	{ IMX471_REG_CSI_DATA_FORMAT, IMX471_CSI_DATA_FORMAT_RAW10 },
 	{ IMX471_REG_CSI_LANE_MODE, IMX471_CSI_4_LANE_MODE },
 	{ IMX471_REG_X_ADD_STA, 8 },
@@ -234,6 +236,48 @@ static const struct cci_reg_sequence mode_1928x1088_regs[] = {
 	{ IMX471_REG_DIG_CROP_HEIGHT, 1088 },
 	{ IMX471_REG_X_OUTPUT_SIZE, 1928 },
 	{ IMX471_REG_Y_OUTPUT_SIZE, 1088 },
+	{ IMX471_REG_VTPXCK_DIV, 0x06 },
+	{ IMX471_REG_VTSYCK_DIV, 0x02 },
+	{ IMX471_REG_PREPLLCK_VT_DIV, 0x02 },
+	{ IMX471_REG_PLL_VT_MPY, 0x0079 },
+	{ IMX471_REG_OPSYCK_DIV, 0x01 },
+	{ CCI_REG8(0x030d), 0x02 },
+	{ CCI_REG8(0x030e), 0x00 },
+	{ CCI_REG8(0x030f), 0x53 },
+	{ IMX471_REG_PLL_MULT_DRIV, IMX471_PLL_DUAL },
+	{ CCI_REG8(0x3f4c), 0x81 },
+	{ CCI_REG8(0x3f4d), 0x81 },
+	{ CCI_REG8(0x3f78), 0x01 },
+	{ CCI_REG8(0x3f79), 0x31 },
+	{ CCI_REG8(0x3ffe), 0x00 },
+	{ CCI_REG8(0x3fff), 0x8a },
+	{ CCI_REG8(0x5f0a), 0xb6 },
+};
+/* A081 factory calibration crop: 2x2 binning, origin (300, 10) in
+ * binned coordinates. Retain the validated 200 MHz CSI/PLL setup;
+ * 1800 frame lines and 2560 line clocks provide approximately 21 fps.
+ */
+static const struct cci_reg_sequence mode_1728x1728_regs[] = {
+	{ IMX471_REG_LLP, 2560 },
+	{ IMX471_REG_CSI_DATA_FORMAT, IMX471_CSI_DATA_FORMAT_RAW10 },
+	{ IMX471_REG_CSI_LANE_MODE, IMX471_CSI_4_LANE_MODE },
+	{ IMX471_REG_X_ADD_STA, 0 },
+	{ IMX471_REG_Y_ADD_STA, 20 },
+	{ IMX471_REG_X_ADD_END, 4655 },
+	{ IMX471_REG_Y_ADD_END, 3475 },
+	{ IMX471_REG_X_EVEN_INC, 1 },
+	{ IMX471_REG_X_ODD_INC, 1 },
+	{ IMX471_REG_Y_EVEN_INC, 1 },
+	{ IMX471_REG_Y_ODD_INC, 1 },
+	{ IMX471_REG_BINNING_MODE, IMX471_BINNING_ENABLE },
+	{ IMX471_REG_BINNING_TYPE, 0x22 },
+	{ IMX471_REG_BINNING_WEIGHTING, 0x08 },
+	{ IMX471_REG_DIG_CROP_X_OFFSET, 300 },
+	{ IMX471_REG_DIG_CROP_Y_OFFSET, 0 },
+	{ IMX471_REG_DIG_CROP_WIDTH, 1728 },
+	{ IMX471_REG_DIG_CROP_HEIGHT, 1728 },
+	{ IMX471_REG_X_OUTPUT_SIZE, 1728 },
+	{ IMX471_REG_Y_OUTPUT_SIZE, 1728 },
 	{ IMX471_REG_VTPXCK_DIV, 0x06 },
 	{ IMX471_REG_VTSYCK_DIV, 0x02 },
 	{ IMX471_REG_PREPLLCK_VT_DIV, 0x02 },
@@ -287,6 +331,15 @@ static const struct imx471_mode imx471_modes[] = {
 		.llp = 2328,
 		.default_mode_regs = mode_1928x1088_regs,
 		.default_mode_regs_length = ARRAY_SIZE(mode_1928x1088_regs),
+	},
+	{
+		.width = 1728,
+		.height = 1728,
+		.fll_def = 1800,
+		.fll_min = 1746,
+		.llp = 2560,
+		.default_mode_regs = mode_1728x1728_regs,
+		.default_mode_regs_length = ARRAY_SIZE(mode_1728x1728_regs),
 	},
 };
 
