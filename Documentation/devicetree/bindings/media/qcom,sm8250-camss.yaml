@@ -14,7 +14,9 @@ description: |
 
 properties:
   compatible:
-    const: qcom,sm8250-camss
+    enum:
+      - qcom,sm8250-camss
+      - qcom,sxr2130-camss
 
   qcom,controller-phase-gpios:
     minItems: 2
@@ -77,9 +79,10 @@ properties:
 
   interrupts:
     minItems: 14
-    maxItems: 14
+    maxItems: 20
 
   interrupt-names:
+    minItems: 14
     items:
       - const: csiphy0
       - const: csiphy1
@@ -95,6 +98,12 @@ properties:
       - const: vfe1
       - const: vfe_lite0
       - const: vfe_lite1
+      - const: csid4
+      - const: vfe_lite2
+      - const: csid5
+      - const: vfe_lite3
+      - const: csid6
+      - const: vfe_lite4
 
   iommus:
     minItems: 8
@@ -294,9 +303,10 @@ properties:
 
   reg:
     minItems: 10
-    maxItems: 10
+    maxItems: 13
 
   reg-names:
+    minItems: 10
     items:
       - const: csiphy0
       - const: csiphy1
@@ -308,6 +318,9 @@ properties:
       - const: vfe1
       - const: vfe_lite0
       - const: vfe_lite1
+      - const: vfe_lite2
+      - const: vfe_lite3
+      - const: vfe_lite4
 
   vdda-phy-supply:
     description:
@@ -337,6 +350,32 @@ dependencies:
     - qcom,controller-phase-csid
   qcom,controller-phase-csid:
     - qcom,controller-phase-gpios
+
+allOf:
+  - if:
+      properties:
+        compatible:
+          const: qcom,sxr2130-camss
+    then:
+      properties:
+        reg:
+          minItems: 13
+        reg-names:
+          minItems: 13
+        interrupts:
+          minItems: 20
+        interrupt-names:
+          minItems: 20
+    else:
+      properties:
+        reg:
+          maxItems: 10
+        reg-names:
+          maxItems: 10
+        interrupts:
+          maxItems: 14
+        interrupt-names:
+          maxItems: 14
 
 additionalProperties: false
 
