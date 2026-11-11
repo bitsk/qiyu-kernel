@@ -29,11 +29,17 @@ Debian/Ubuntu 主机需 GNU make、GCC arm64 交叉工具链、binutils、bc、b
 此配置生成 `7.3.0-qiyu-mix-scheduling` 及同名模块目录，启用 cgroup v2 cpuset、
 任务和分组 uclamp、Energy Model、多核与 cluster 调度拓扑。
 保留 PREEMPT、HZ=250、schedutil 和既有 FIFO/RR 的权限语义，不启用 RT_GROUP_SCHED。
-Energy Model 注册和 EAS 是否生效仍须在目标机检查，不能从配置项推断。
+实机已确认三个 Energy Model 域（0–3、4–6、7）；全部 CPU policy 使用
+`schedutil` 时 EAS 可启用。系统使用 `performance` 时 EAS 不参与，不能仅从
+配置项或 Energy Model 注册推断 EAS 已启用。
 调度观测提供 sched tracepoints、唤醒延迟 tracer 和 perf；不启用全函数插桩，
 printk ring 沿用当前设备候选的 16 KiB，以满足既有 ABL 的内核内存地址限制。
 功能支持不会自动分配 CPU 或提高频率；用户态策略属于 qiyu-vr-session/rootfs。
-此候选尚未实机验收，必须保留已验证内核及配套模块，不能自动晋升基线。
+此配置已在 A081 安装系统通过启动、cpuset/uclamp 实际读写、连续原生场景及
+正常资源清理和 Android B/root 返回验证。调度能力通过不等于性能提升：一次
+同场景 A/B/A 中，组合 `schedutil`、图形 4–7 核和 20% uclamp 下限未改善
+帧时序，因此保留原用户态策略，未默认启用该组合。佩戴体验与实体手柄精度另验；
+更新设备时仍须保留上一份已验证内核及配套模块。
 
 ## 适配与验收范围
 
