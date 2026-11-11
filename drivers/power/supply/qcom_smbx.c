@@ -550,7 +550,7 @@ static int smb_get_charger_type(struct smb_chip *chip, int *val)
 	union power_supply_propval source;
 
 	/* PD is reported by TCPM and does not depend on a BC1.2 APSD result. */
-	if (chip->gen == SMB5 &&
+	if (chip->gen == SMB5 && chip->chg_psy &&
 	    !power_supply_get_property_from_supplier(chip->chg_psy,
 						    POWER_SUPPLY_PROP_USB_TYPE,
 						    &source) &&
@@ -712,18 +712,20 @@ static void smb_status_change_work(struct work_struct *work)
 
 	rc = smb_get_charger_type(chip, &charger_type);
 	if (!rc && charger_type == POWER_SUPPLY_USB_TYPE_PD) {
+		/* Keep the default USB limit while TCPM updates the contract. */
+		current_ua = SDP_CURRENT_UA;
 		rc = power_supply_get_property_from_supplier(chip->chg_psy,
 							 POWER_SUPPLY_PROP_VOLTAGE_NOW,
 							 &source_voltage);
 		if (rc || source_voltage.intval != 5000000) {
 			dev_err_ratelimited(chip->dev, "Only fixed 5 V PD is supported\n");
-			return;
+			goto set_limit;
 		}
 		rc = power_supply_get_property_from_supplier(chip->chg_psy,
 							 POWER_SUPPLY_PROP_CURRENT_MAX,
 							 &source_current);
 		if (rc || source_current.intval <= 0)
-			return;
+			goto set_limit;
 		current_ua = source_current.intval;
 		goto set_limit;
 	}
