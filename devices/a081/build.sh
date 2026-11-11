@@ -2,7 +2,15 @@
 # SPDX-License-Identifier: GPL-2.0-only
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
-[[ $# -eq 1 ]] || { echo "Usage: $0 NEW_OUTPUT_DIRECTORY" >&2; exit 1; }
+[[ $# -ge 1 && $# -le 2 ]] || {
+    echo "Usage: $0 NEW_OUTPUT_DIRECTORY [default|xr-scheduling]" >&2; exit 1;
+}
+profile=${2:-default}
+case "$profile" in
+    default) expected_release=7.3.0-qiyu-mix ;;
+    xr-scheduling) expected_release=7.3.0-qiyu-mix-scheduling ;;
+    *) echo 'Unknown A081 build profile' >&2; exit 1 ;;
+esac
 out=$(realpath -m "$1")
 [[ "$out" != "$root" && "$out" != "$root/"* ]] || {
     echo 'Choose an output directory outside the source tree' >&2; exit 1;
@@ -16,12 +24,28 @@ export KBUILD_BUILD_USER=qiyu KBUILD_BUILD_HOST=build
 export KBUILD_BUILD_TIMESTAMP='1970-01-01 00:00:00 +0000' KBUILD_BUILD_VERSION=1
 mkdir "$out/build" "$out/artifacts"
 cp "$root/devices/a081/config/kernel.config" "$out/build/.config"
+if [[ "$profile" == xr-scheduling ]]; then
+    "$root/scripts/kconfig/merge_config.sh" -m -O "$out/build" \
+        "$root/devices/a081/config/kernel.config" \
+        "$root/devices/a081/config/xr-scheduling.config"
+fi
 make -C "$root" O="$out/build" olddefconfig
-cmp "$root/devices/a081/config/kernel.config" "$out/build/.config"
+if [[ "$profile" == default ]]; then
+    cmp "$root/devices/a081/config/kernel.config" "$out/build/.config"
+else
+    # Reject requested settings dropped by Kconfig dependencies.
+    while IFS= read -r setting; do
+        if [[ "$setting" == CONFIG_*=* || "$setting" == '# CONFIG_'*' is not set' ]]; then
+            grep -Fxq "$setting" "$out/build/.config" || {
+                echo "Unresolved scheduling setting: $setting" >&2; exit 1;
+            }
+        fi
+    done < "$root/devices/a081/config/xr-scheduling.config"
+fi
 make -C "$root" O="$out/build" -j"${A081_BUILD_JOBS:-12}" \
     Image modules qcom/sm8250-iqiyi-a081.dtb
 release=$(cat "$out/build/include/config/kernel.release")
-[[ "$release" == 7.3.0-qiyu-mix ]]
+[[ "$release" == "$expected_release" ]]
 make -C "$root" O="$out/build" INSTALL_MOD_PATH="$out/modules" \
     INSTALL_MOD_STRIP=1 modules_install
 rm -f "$out/modules/lib/modules/$release/build" "$out/modules/lib/modules/$release/source"

@@ -20,6 +20,21 @@ Debian/Ubuntu 主机需 GNU make、GCC arm64 交叉工具链、binutils、bc、b
 
 脚本仅接受源码树之外的新目录，生成 Image、源 DTB、配置与模块包，不访问设备。模块安装路径为 `lib/modules/7.3.0-qiyu-mix`，必须与相同版本的内核配套。设备树检查使用内核标准 dt_binding_check / dtbs_check，需 dtschema。版本后缀修改不涉及驱动、DTS 或 binding。
 
+可选的 XR 调度候选使用独立配置片段，默认构建不变：
+
+```sh
+./devices/a081/build.sh /absolute/path/to/new-output xr-scheduling
+```
+
+此配置生成 `7.3.0-qiyu-mix-scheduling` 及同名模块目录，启用 cgroup v2 cpuset、
+任务和分组 uclamp、Energy Model、多核与 cluster 调度拓扑。
+保留 PREEMPT、HZ=250、schedutil 和既有 FIFO/RR 的权限语义，不启用 RT_GROUP_SCHED。
+Energy Model 注册和 EAS 是否生效仍须在目标机检查，不能从配置项推断。
+调度观测提供 sched tracepoints、唤醒延迟 tracer 和 perf；不启用全函数插桩，
+printk ring 沿用当前设备候选的 16 KiB，以满足既有 ABL 的内核内存地址限制。
+功能支持不会自动分配 CPU 或提高频率；用户态策略属于 qiyu-vr-session/rootfs。
+此候选尚未实机验收，必须保留已验证内核及配套模块，不能自动晋升基线。
+
 ## 适配与验收范围
 
 包含板级 DTS/binding、屏幕和 DRM、QCOM SEE 传感器、CAMSS 与 QCFT 元数据、OV7251 曝光/相位控制、CCI 批量写入与诊断、Nordic 72 字节控制器传输/复位、Venus 视频编解码、系统调用与 FUSE、原厂/性能两档温控等适配。
