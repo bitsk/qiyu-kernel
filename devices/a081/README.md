@@ -57,3 +57,17 @@ sha256sum -c SHA256SUMS
 ```
 
 源码 DTB 与启动 DTB 分别保存；后者含既有启动适配，不能混用。内核与全部模块需一同更新。上机前确认 A081 身份、既有 osstore 安装和可用回退；启动分区仅允许 recovery_b，完整读回一致后才启动。boot A/B、ABL、DTBO、vbmeta、GPT 和 userdata 不在写入范围。仓库不提供自动刷写，本次发布未操作设备。
+
+## Fixed 5 V USB PD candidate
+
+`./devices/a081/build.sh /absolute/path/to/new-output usb-pd-5v` builds the
+fixed 5 V / 3 A sink candidate while retaining the accepted six-camera kernel
+configuration. The charger follows TCPM's PD current contract without waiting
+for a BC1.2 APSD result, and still applies the board input-current ceiling.
+The connector advertises no PPS or high-voltage PDOs.
+
+The stock board describes additional 9 V and 12 V sink capabilities. Those
+require SMB5 adapter-allowance and switching-frequency control before enabling
+them here. The fixed 5 V candidate is not equivalent to the complete stock fast
+charging implementation. USB input power, net battery charging power, actual PD
+negotiation, and camera/tracking behavior need separate device validation.

@@ -545,6 +545,23 @@ static int smb_apsd_get_charger_type(struct smb_chip *chip, int *val)
 	return 0;
 }
 
+static int smb_get_charger_type(struct smb_chip *chip, int *val)
+{
+	union power_supply_propval source;
+
+	/* PD is reported by TCPM and does not depend on a BC1.2 APSD result. */
+	if (chip->gen == SMB5 &&
+	    !power_supply_get_property_from_supplier(chip->chg_psy,
+						    POWER_SUPPLY_PROP_USB_TYPE,
+						    &source) &&
+	    source.intval == POWER_SUPPLY_USB_TYPE_PD) {
+		*val = source.intval;
+		return 0;
+	}
+
+	return smb_apsd_get_charger_type(chip, val);
+}
+
 /* Return 1 when in overvoltage state, else 0 or -errno */
 static int smbx_ov_status(struct smb_chip *chip)
 {
@@ -679,7 +696,7 @@ static int smb_set_current_limit(struct smb_chip *chip, unsigned int val)
 
 static void smb_status_change_work(struct work_struct *work)
 {
-	union power_supply_propval source_current;
+	union power_supply_propval source_current, source_voltage;
 	unsigned int charger_type, current_ua;
 	int usb_online = 0;
 	int count, rc;
@@ -692,6 +709,24 @@ static void smb_status_change_work(struct work_struct *work)
 	smb_get_prop_usb_online(chip, &usb_online);
 	if (!usb_online)
 		return;
+
+	rc = smb_get_charger_type(chip, &charger_type);
+	if (!rc && charger_type == POWER_SUPPLY_USB_TYPE_PD) {
+		rc = power_supply_get_property_from_supplier(chip->chg_psy,
+							 POWER_SUPPLY_PROP_VOLTAGE_NOW,
+							 &source_voltage);
+		if (rc || source_voltage.intval != 5000000) {
+			dev_err_ratelimited(chip->dev, "Only fixed 5 V PD is supported\n");
+			return;
+		}
+		rc = power_supply_get_property_from_supplier(chip->chg_psy,
+							 POWER_SUPPLY_PROP_CURRENT_MAX,
+							 &source_current);
+		if (rc || source_current.intval <= 0)
+			return;
+		current_ua = source_current.intval;
+		goto set_limit;
+	}
 
 	for (count = 0; count < 3; count++) {
 		dev_dbg(chip->dev, "get charger type retry %d\n", count);
@@ -740,6 +775,7 @@ static void smb_status_change_work(struct work_struct *work)
 	    source_current.intval > 0)
 		current_ua = source_current.intval;
 
+set_limit:
 	rc = smb_set_current_limit(chip, min(current_ua, chip->icl_max_ua));
 	if (rc < 0) {
 		dev_err(chip->dev, "could not set input current: %d\n", rc);
@@ -899,7 +935,7 @@ static int smb_get_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_HEALTH:
 		return smb_get_prop_health(chip, &val->intval);
 	case POWER_SUPPLY_PROP_USB_TYPE:
-		return smb_apsd_get_charger_type(chip, &val->intval);
+		return smb_get_charger_type(chip, &val->intval);
 	default:
 		dev_err(chip->dev, "invalid property: %d\n", psp);
 		return -EINVAL;
@@ -1619,6 +1655,8 @@ static int smb_probe(struct platform_device *pdev)
 	if (!desc)
 		return -ENOMEM;
 	memcpy(desc, &smb_psy_desc, sizeof(smb_psy_desc));
+	if (chip->gen == SMB5)
+		desc->usb_types |= BIT(POWER_SUPPLY_USB_TYPE_PD);
 	desc->name =
 		devm_kasprintf(chip->dev, GFP_KERNEL, "%s-charger",
 			       match_data->name);

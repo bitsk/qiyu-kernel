@@ -3,12 +3,13 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 [[ $# -ge 1 && $# -le 2 ]] || {
-    echo "Usage: $0 NEW_OUTPUT_DIRECTORY [default|xr-scheduling]" >&2; exit 1;
+    echo "Usage: $0 NEW_OUTPUT_DIRECTORY [default|xr-scheduling|usb-pd-5v]" >&2; exit 1;
 }
 profile=${2:-default}
 case "$profile" in
     default) expected_release=7.3.0-qiyu-mix ;;
     xr-scheduling) expected_release=7.3.0-qiyu-mix-scheduling ;;
+    usb-pd-5v) expected_release=7.3.0-qiyu-mix-usb-pd5v ;;
     *) echo 'Unknown A081 build profile' >&2; exit 1 ;;
 esac
 out=$(realpath -m "$1")
@@ -24,10 +25,17 @@ export KBUILD_BUILD_USER=qiyu KBUILD_BUILD_HOST=build
 export KBUILD_BUILD_TIMESTAMP='1970-01-01 00:00:00 +0000' KBUILD_BUILD_VERSION=1
 mkdir "$out/build" "$out/artifacts"
 cp "$root/devices/a081/config/kernel.config" "$out/build/.config"
+fragments=()
 if [[ "$profile" == xr-scheduling ]]; then
+    fragments=("$root/devices/a081/config/xr-scheduling.config")
+elif [[ "$profile" == usb-pd-5v ]]; then
+    fragments=("$root/devices/a081/config/xr-cameras.config"
+               "$root/devices/a081/config/usb-pd-5v.config")
+fi
+if [[ ${#fragments[@]} -gt 0 ]]; then
     "$root/scripts/kconfig/merge_config.sh" -m -O "$out/build" \
         "$root/devices/a081/config/kernel.config" \
-        "$root/devices/a081/config/xr-scheduling.config"
+        "${fragments[@]}"
 fi
 make -C "$root" O="$out/build" olddefconfig
 if [[ "$profile" == default ]]; then
@@ -37,10 +45,10 @@ else
     while IFS= read -r setting; do
         if [[ "$setting" == CONFIG_*=* || "$setting" == '# CONFIG_'*' is not set' ]]; then
             grep -Fxq "$setting" "$out/build/.config" || {
-                echo "Unresolved scheduling setting: $setting" >&2; exit 1;
+                echo "Unresolved profile setting: $setting" >&2; exit 1;
             }
         fi
-    done < "$root/devices/a081/config/xr-scheduling.config"
+    done < <(cat "${fragments[@]}")
 fi
 make -C "$root" O="$out/build" -j"${A081_BUILD_JOBS:-12}" \
     Image modules qcom/sm8250-iqiyi-a081.dtb

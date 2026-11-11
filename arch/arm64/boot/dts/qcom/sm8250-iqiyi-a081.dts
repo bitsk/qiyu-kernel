@@ -11,6 +11,7 @@
 #include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
 #include <dt-bindings/regulator/qcom,rpmh-regulator.h>
 #include <dt-bindings/thermal/thermal.h>
+#include <dt-bindings/usb/pd.h>
 #include "sm8250.dtsi"
 #include "pm8150.dtsi"
 #include "pm8150b.dtsi"
@@ -720,8 +721,9 @@
 		power-role = "sink";
 		data-role = "device";
 		vbus-supply = <&pm8150b_vbus>;
-		/* Use 5 V Type-C Rp current until PD is separately validated. */
-		pd-disable;
+		/* Higher stock PDOs need SMB5 voltage-window/frequency control. */
+		sink-pdos = <PDO_FIXED(5000, 3000, PDO_FIXED_USB_COMM)>;
+		op-sink-microwatt = <15000000>;
 		typec-power-opmode = "default";
 	};
 };
