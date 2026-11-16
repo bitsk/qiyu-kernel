@@ -1101,6 +1101,7 @@ properties:
       - items:
           - enum:
               - iqiyi,a081
+              - iqiyi,vr700
               - qcom,qrb5165-rb5
               - qcom,sm8250-hdk
               - qcom,sm8250-mtp

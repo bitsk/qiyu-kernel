@@ -4,25 +4,27 @@
 $id: http://devicetree.org/schemas/display/panel/iqiyi,a081-panel.yaml#
 $schema: http://devicetree.org/meta-schemas/core.yaml#
 
-title: iQIYI Qiyu MIX A081 dual DSI display assembly
+title: iQIYI Qiyu MIX and VR700 dual DSI display assemblies
 
 maintainers:
   - Qiyu Project <qiyu@example.invalid>
 
 description: |
-  The BID-08 display assembly uses two four-lane DSI links and DSC for a
-  1920 by 3664 video-mode panel. The compatible identifies this board
+  The MIX BID-08 and VR700 BID-15 assemblies use two four-lane DSI links and
+  DSC for a 1920 by 3664 video-mode panel. The compatible identifies this board
   assembly; the vendor strings in the original firmware do not reliably
   identify the physical panel manufacturer. Port 0 is the primary link.
-  Board control GPIOs follow the BID-08 sequence, including high levels
-  on the boost and LED controls during normal shutdown.
+  Both assemblies share the stock command tables and power sequence, including
+  high levels on the boost and LED controls during normal shutdown.
 
 allOf:
   - $ref: panel-common-dual.yaml#
 
 properties:
   compatible:
-    const: iqiyi,a081-panel
+    enum:
+      - iqiyi,a081-panel
+      - iqiyi,vr700-panel
   reg:
     maxItems: 1
   vddio-supply:

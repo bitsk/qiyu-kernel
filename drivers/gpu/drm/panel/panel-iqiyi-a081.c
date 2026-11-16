@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Qiyu MIX A081 BID-08 dual DSI display assembly. */
+/* Qiyu MIX BID-08 and VR700 BID-15 dual DSI display assemblies. */
 #include <linux/backlight.h>
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
@@ -596,6 +596,7 @@ static void a081_remove(struct mipi_dsi_device *dsi)
 
 static const struct of_device_id a081_of_match[] = {
 	{ .compatible = "iqiyi,a081-panel" },
+	{ .compatible = "iqiyi,vr700-panel" },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, a081_of_match);
@@ -611,5 +612,5 @@ static struct mipi_dsi_driver a081_driver = {
 };
 module_mipi_dsi_driver(a081_driver);
 
-MODULE_DESCRIPTION("Qiyu MIX A081 dual DSI display assembly");
+MODULE_DESCRIPTION("Qiyu MIX and VR700 dual DSI display assemblies");
 MODULE_LICENSE("GPL");
