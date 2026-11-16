@@ -19,7 +19,7 @@ cp "$root/devices/vr700/config/kernel.config" "$out/build/.config"
 make -C "$root" O="$out/build" olddefconfig
 make -C "$root" O="$out/build" -j"${JOBS:-12}" Image modules qcom/sm8250-iqiyi-vr700.dtb
 release=$(cat "$out/build/include/config/kernel.release")
-[[ "$release" == 7.3.0-xr-vr700 ]]
+[[ "$release" == 7.3.0-xr-vr700-tracking ]]
 make -C "$root" O="$out/build" INSTALL_MOD_PATH="$out/modules" INSTALL_MOD_STRIP=1 modules_install
 rm -f "$out/modules/lib/modules/$release/build" "$out/modules/lib/modules/$release/source"
 tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \

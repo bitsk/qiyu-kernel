@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 /* iQIYI VR700 / Qiyu DREAM Pro (BID-15).
  * Wiring and regulator constraints follow the selected stock runtime FDT.
- * Radio, cameras, sensors and audio require independent board validation.
+ * Audio requires independent board validation.
  */
 /dts-v1/;
 #include <dt-bindings/input/input.h>
@@ -11,13 +11,14 @@
 #include "pm8150.dtsi"
 #include "pm8150b.dtsi"
 #include "pm8150l.dtsi"
+#include "sm8250-iqiyi-vr700-cameras.dtsi"
 
 / {
 	model = "iQIYI VR700 / Qiyu DREAM Pro";
 	compatible = "iqiyi,vr700", "qcom,sm8250";
 	qcom,msm-id = <356 0x20001>;
 	qcom,board-id = <0x01010008 0>;
-	aliases { serial0 = &uart12; };
+	aliases { serial0 = &uart12; serial1 = &uart3; };
 	chosen { stdout-path = "serial0:115200n8"; };
 	fan {
 		compatible = "pwm-fan";
@@ -134,6 +135,37 @@
 			regulator-name = "vreg_l17a";
 			regulator-min-microvolt = <2496000>;
 			regulator-max-microvolt = <3008000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+	};
+	regulators-1 {
+		compatible = "qcom,pm8150l-rpmh-regulators";
+		qcom,pmic-id = "c";
+		qcom,always-wait-for-ack;
+		vreg_l11c: ldo11 {
+			regulator-name = "vreg_l11c";
+			regulator-min-microvolt = <3304000>;
+			regulator-max-microvolt = <3304000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+			/* Stock XR board driver holds the IMU's AP supply vote. */
+			regulator-boot-on;
+			regulator-always-on;
+		};
+	};
+	regulators-2 {
+		compatible = "qcom,pm8009-rpmh-regulators";
+		qcom,pmic-id = "f";
+		qcom,always-wait-for-ack;
+		vreg_l6f: ldo6 {
+			regulator-name = "vreg_l6f";
+			regulator-min-microvolt = <2800000>;
+			regulator-max-microvolt = <2800000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+		vreg_l7f: ldo7 {
+			regulator-name = "vreg_l7f";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
 		};
 	};
@@ -271,6 +303,18 @@
 
 
 &pm8150_gpios {
+	pinctrl-names = "default";
+	pinctrl-0 = <&imu_clkin_default>;
+	imu_clkin_default: imu-clkin-state {
+		pins = "gpio3";
+		function = "func1";
+		power-source = <0>;
+		bias-disable;
+		drive-push-pull;
+		qcom,dtest-buffer = <1>;
+		qcom,drive-strength = <PMIC_GPIO_STRENGTH_LOW>;
+		output-low;
+	};
 	key_back_default: key-back-state {
 		pins = "gpio1";
 		function = "normal";
@@ -370,3 +414,46 @@
 	status = "okay";
 };
 
+
+&slpi {
+	firmware-name = "qcom/sm8250/iqiyi/vr700/slpi.mdt";
+	status = "okay";
+};
+
+&cdsp {
+	firmware-name = "qcom/sm8250/iqiyi/vr700/cdsp.mdt";
+	status = "okay";
+};
+
+&qupv3_id_0 {
+	status = "okay";
+};
+
+&uart3 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&controller_uart_default>;
+	status = "okay";
+};
+
+&tlmm {
+	controller_uart_default: controller-uart-state {
+		ctsrx-pins {
+			pins = "gpio119", "gpio122";
+			function = "qup3";
+			drive-strength = <2>;
+			bias-disable;
+		};
+		rts-pins {
+			pins = "gpio120";
+			function = "qup3";
+			drive-strength = <2>;
+			bias-pull-down;
+		};
+		tx-pins {
+			pins = "gpio121";
+			function = "qup3";
+			drive-strength = <2>;
+			bias-pull-up;
+		};
+	};
+};
