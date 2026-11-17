@@ -1,0 +1,459 @@
+// SPDX-License-Identifier: BSD-3-Clause
+/* iQIYI VR700 / Qiyu DREAM Pro (BID-15).
+ * Wiring and regulator constraints follow the selected stock runtime FDT.
+ * Audio requires independent board validation.
+ */
+/dts-v1/;
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
+#include <dt-bindings/regulator/qcom,rpmh-regulator.h>
+#include "sm8250.dtsi"
+#include "pm8150.dtsi"
+#include "pm8150b.dtsi"
+#include "pm8150l.dtsi"
+#include "sm8250-iqiyi-vr700-cameras.dtsi"
+
+/ {
+	model = "iQIYI VR700 / Qiyu DREAM Pro";
+	compatible = "iqiyi,vr700", "qcom,sm8250";
+	qcom,msm-id = <356 0x20001>;
+	qcom,board-id = <0x01010008 0>;
+	aliases { serial0 = &uart12; serial1 = &uart3; };
+	chosen { stdout-path = "serial0:115200n8"; };
+	fan {
+		compatible = "pwm-fan";
+		pwms = <&pm8150l_lpg 4 40000>;
+		fan-supply = <&fan_power>;
+		cooling-levels = <0 255>;
+		#cooling-cells = <2>;
+	};
+	fan_power: regulator-fan-power {
+		compatible = "regulator-fixed";
+		regulator-name = "fan-power";
+		gpio = <&tlmm 114 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		regulator-boot-on;
+	};
+	gpio-keys {
+		compatible = "gpio-keys";
+		label = "gpio-keys";
+		pinctrl-names = "default";
+		pinctrl-0 = <&key_back_default &key_confirm_volume_default>;
+
+		key-confirm {
+			label = "confirm";
+			gpios = <&pm8150_gpios 7 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_ENTER>;
+			debounce-interval = <15>;
+			linux,can-disable;
+			wakeup-source;
+		};
+
+		key-back {
+			label = "back";
+			gpios = <&pm8150_gpios 1 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_BACK>;
+			debounce-interval = <15>;
+			linux,can-disable;
+			wakeup-source;
+		};
+
+		key-volume-up {
+			label = "vol_up";
+			gpios = <&pm8150_gpios 6 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_VOLUMEUP>;
+			debounce-interval = <15>;
+			linux,can-disable;
+			wakeup-source;
+		};
+	};
+	reserved-memory {
+		/* Stock splash and display dump describe the same physical region. */
+		framebuffer_reserved: memory@9c000000 {
+			reg = <0x0 0x9c000000 0x0 0x2700000>;
+			no-map;
+		};
+
+		/* Stock node's unit address is stale; use its actual reg value. */
+		dfps_reserved: memory@9e700000 {
+			reg = <0x0 0x9e700000 0x0 0x100000>;
+			no-map;
+		};
+	};
+};
+
+&apps_rsc {
+	regulators-0 {
+		compatible = "qcom,pm8150-rpmh-regulators";
+		qcom,pmic-id = "a";
+		qcom,always-wait-for-ack;
+		vreg_s4a: smps4 {
+			regulator-name = "vreg_s4a";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1920000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+		vreg_l2a: ldo2 {
+			regulator-name = "vreg_l2a";
+			regulator-min-microvolt = <3072000>;
+			regulator-max-microvolt = <3072000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+		vreg_l5a: ldo5 {
+			regulator-name = "vreg_l5a";
+			regulator-min-microvolt = <880000>;
+			regulator-max-microvolt = <880000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+		vreg_l6a: ldo6 {
+			regulator-name = "vreg_l6a";
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1200000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+		vreg_l9a: ldo9 {
+			regulator-name = "vreg_l9a";
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1200000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+		vreg_l12a: ldo12 {
+			regulator-name = "vreg_l12a";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+		vreg_l14a: ldo14 {
+			regulator-name = "vreg_l14a";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1880000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+			regulator-allowed-modes = <RPMH_REGULATOR_MODE_LPM RPMH_REGULATOR_MODE_HPM>;
+			regulator-allow-set-load;
+		};
+		vreg_l17a: ldo17 {
+			regulator-name = "vreg_l17a";
+			regulator-min-microvolt = <2496000>;
+			regulator-max-microvolt = <3008000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+	};
+	regulators-1 {
+		compatible = "qcom,pm8150l-rpmh-regulators";
+		qcom,pmic-id = "c";
+		qcom,always-wait-for-ack;
+		vreg_l11c: ldo11 {
+			regulator-name = "vreg_l11c";
+			regulator-min-microvolt = <3304000>;
+			regulator-max-microvolt = <3304000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+			/* Stock XR board driver holds the IMU's AP supply vote. */
+			regulator-boot-on;
+			regulator-always-on;
+		};
+	};
+	regulators-2 {
+		compatible = "qcom,pm8009-rpmh-regulators";
+		qcom,pmic-id = "f";
+		qcom,always-wait-for-ack;
+		vreg_l6f: ldo6 {
+			regulator-name = "vreg_l6f";
+			regulator-min-microvolt = <2800000>;
+			regulator-max-microvolt = <2800000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+		vreg_l7f: ldo7 {
+			regulator-name = "vreg_l7f";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+	};
+};
+
+&gmu {
+	status = "okay";
+};
+
+&gpu {
+	status = "okay";
+};
+
+&gpu_zap_shader {
+	/* OEM signed image, extracted from this board's original vendor backup. */
+	firmware-name = "qcom/sm8250/iqiyi/vr700/a650_zap.mdt";
+};
+
+&mdss {
+	status = "okay";
+};
+
+&mdss_dsi0 {
+	vdda-supply = <&vreg_l9a>;
+	qcom,dual-dsi-mode;
+	qcom,sync-dual-dsi;
+	qcom,master-dsi;
+	status = "okay";
+
+	panel@0 {
+		compatible = "iqiyi,vr700-panel";
+		reg = <0>;
+		vddio-supply = <&vreg_l14a>;
+		vsp-supply = <&lcdb_ldo>;
+		vsn-supply = <&lcdb_ncp>;
+		reset-gpios = <&tlmm 75 GPIO_ACTIVE_LOW>;
+		boost-gpios = <&tlmm 3 GPIO_ACTIVE_HIGH>;
+		io-enable-gpios = <&tlmm 140 GPIO_ACTIVE_HIGH>;
+		led-5v-gpios = <&tlmm 134 GPIO_ACTIVE_HIGH>;
+		led1-gpios = <&tlmm 0 GPIO_ACTIVE_HIGH>;
+		led2-gpios = <&tlmm 1 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "active", "sleep";
+		pinctrl-0 = <&panel_active>;
+		pinctrl-1 = <&panel_sleep>;
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			port@0 {
+				reg = <0>;
+				vr700_panel_in0: endpoint {
+					remote-endpoint = <&mdss_dsi0_out>;
+				};
+			};
+			port@1 {
+				reg = <1>;
+				vr700_panel_in1: endpoint {
+					remote-endpoint = <&mdss_dsi1_out>;
+				};
+			};
+		};
+	};
+};
+
+&mdss_dsi0_out {
+	data-lanes = <0 1 2 3>;
+	remote-endpoint = <&vr700_panel_in0>;
+};
+
+&mdss_dsi0_phy {
+	vdds-supply = <&vreg_l5a>;
+	status = "okay";
+};
+
+&mdss_dsi1 {
+	vdda-supply = <&vreg_l9a>;
+	qcom,dual-dsi-mode;
+	qcom,sync-dual-dsi;
+	assigned-clock-parents = <&mdss_dsi0_phy DSI_BYTE_PLL_CLK>,
+				 <&mdss_dsi0_phy DSI_PIXEL_PLL_CLK>;
+	status = "okay";
+};
+
+&mdss_dsi1_out {
+	data-lanes = <0 1 2 3>;
+	remote-endpoint = <&vr700_panel_in1>;
+};
+
+&mdss_dsi1_phy {
+	vdds-supply = <&vreg_l5a>;
+	status = "okay";
+};
+
+&tlmm {
+	panel_active: panel-active-state {
+		pins = "gpio75";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-disable;
+	};
+	panel_sleep: panel-sleep-state {
+		pins = "gpio75";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
+};
+
+&spmi_bus {
+	pmic@5 {
+		/* Stock runtime FDT: PM8150L SID5, LCDB at 0xec00.
+		 * Stock applies 5.7 V constraints at registration. The panel driver
+		 * coordinates positive/negative votes through its power sequence.
+		 */
+		regulator@ec00 {
+			compatible = "qcom,pm8150l-lcdb";
+			reg = <0xec00>;
+			interrupts = <0x5 0xec 0x1 IRQ_TYPE_EDGE_RISING>;
+			interrupt-names = "sc-err";
+
+			lcdb_ldo: ldo {
+				regulator-name = "lcdb-ldo";
+				regulator-min-microvolt = <5700000>;
+				regulator-max-microvolt = <5900000>;
+			};
+
+			lcdb_ncp: ncp {
+				regulator-name = "lcdb-ncp";
+				regulator-min-microvolt = <5700000>;
+				regulator-max-microvolt = <5900000>;
+			};
+		};
+	};
+};
+
+
+&pm8150_gpios {
+	pinctrl-names = "default";
+	pinctrl-0 = <&imu_clkin_default>;
+	imu_clkin_default: imu-clkin-state {
+		pins = "gpio3";
+		function = "func1";
+		power-source = <0>;
+		bias-disable;
+		drive-push-pull;
+		qcom,dtest-buffer = <1>;
+		qcom,drive-strength = <PMIC_GPIO_STRENGTH_LOW>;
+		output-low;
+	};
+	key_back_default: key-back-state {
+		pins = "gpio1";
+		function = "normal";
+		power-source = <0>;
+		bias-pull-up;
+		input-enable;
+	};
+	key_confirm_volume_default: key-confirm-volume-state {
+		pins = "gpio6", "gpio7";
+		function = "normal";
+		power-source = <1>;
+		bias-pull-up;
+		input-enable;
+	};
+};
+
+&pm8150l_gpios {
+	fan_pwm_default: fan-pwm-state {
+		pins = "gpio10";
+		function = "func1";
+		power-source = <0>;
+		bias-disable;
+		drive-push-pull;
+		/* Downstream HIGH=3; the mainline binding uses HIGH=1. */
+		qcom,drive-strength = <PMIC_GPIO_STRENGTH_HIGH>;
+		output-low;
+	};
+};
+
+&pm8150l_lpg {
+	pinctrl-names = "default";
+	pinctrl-0 = <&fan_pwm_default>;
+	status = "okay";
+};
+
+&pon {
+	/* Same PM8998 PON reason as upstream SM8250 HDK/MTP. */
+	mode-bootloader = <0x2>;
+};
+
+&pon_pwrkey {
+	status = "okay";
+};
+
+&pon_resin {
+	linux,code = <KEY_VOLUMEDOWN>;
+	status = "okay";
+};
+
+&qupv3_id_1 {
+	status = "okay";
+};
+
+&qup_uart12_default {
+	drive-strength = <2>;
+};
+
+&uart12 {
+	status = "okay";
+};
+
+&ufs_mem_hc {
+	vcc-supply = <&vreg_l17a>;
+	vcc-max-microamp = <800000>;
+	vccq-supply = <&vreg_l6a>;
+	vccq-max-microamp = <800000>;
+	vccq2-supply = <&vreg_s4a>;
+	vccq2-max-microamp = <800000>;
+	/* Stock uses the dedicated ufs_reset pad, not EGPIO-capable GPIO175. */
+	reset-gpios = <&tlmm 180 GPIO_ACTIVE_LOW>;
+	status = "okay";
+};
+
+&ufs_mem_phy {
+	vdda-phy-supply = <&vreg_l5a>;
+	vdda-pll-supply = <&vreg_l9a>;
+	status = "okay";
+};
+
+&usb_1 {
+	/* No SSPHY: the core must use UTMI instead of the USB3 PIPE clock. */
+	qcom,select-utmi-as-pipe-clk;
+	status = "okay";
+};
+
+&usb_1_dwc3 {
+	dr_mode = "peripheral";
+	maximum-speed = "high-speed";
+	phys = <&usb_1_hsphy>;
+	phy-names = "usb2-phy";
+};
+
+&usb_1_hsphy {
+	vdda-pll-supply = <&vreg_l5a>;
+	vdda18-supply = <&vreg_l12a>;
+	vdda33-supply = <&vreg_l2a>;
+	status = "okay";
+};
+
+
+&slpi {
+	firmware-name = "qcom/sm8250/iqiyi/vr700/slpi.mdt";
+	status = "okay";
+};
+
+&cdsp {
+	firmware-name = "qcom/sm8250/iqiyi/vr700/cdsp.mdt";
+	status = "okay";
+};
+
+&qupv3_id_0 {
+	status = "okay";
+};
+
+&uart3 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&controller_uart_default>;
+	status = "okay";
+};
+
+&tlmm {
+	controller_uart_default: controller-uart-state {
+		ctsrx-pins {
+			pins = "gpio119", "gpio122";
+			function = "qup3";
+			drive-strength = <2>;
+			bias-disable;
+		};
+		rts-pins {
+			pins = "gpio120";
+			function = "qup3";
+			drive-strength = <2>;
+			bias-pull-down;
+		};
+		tx-pins {
+			pins = "gpio121";
+			function = "qup3";
+			drive-strength = <2>;
+			bias-pull-up;
+		};
+	};
+};

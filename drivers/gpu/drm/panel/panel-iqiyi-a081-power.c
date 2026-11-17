@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* A081 BID-08 sequence recovered from the matching stock kernel and FDT. */
+/* Shared BID-08/BID-15 sequence verified against both stock kernels and FDTs. */
 #include <linux/errno.h>
 
 #include "panel-iqiyi-a081-power.h"
@@ -18,7 +18,7 @@ int a081_power_off(struct a081_power *p)
 	if (!p->touched && !p->rails)
 		return 0;
 
-	/* BID-08 deliberately keeps these four controls high during shutdown. */
+	/* BID-08 and BID-15 keep these four controls high during shutdown. */
 	keep_error(&ret, ops->gpio(p->ctx, A081_BOOST, true));
 	keep_error(&ret, ops->gpio(p->ctx, A081_RESET, true));
 	ops->delay_ms(p->ctx, 30);
