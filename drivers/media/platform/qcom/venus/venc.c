@@ -548,7 +548,10 @@ venc_encoder_cmd(struct file *file, void *fh, struct v4l2_encoder_cmd *cmd)
 
 		fdata.buffer_type = HFI_BUFFER_INPUT;
 		fdata.flags |= HFI_BUFFERFLAG_EOS;
-		fdata.device_addr = 0xdeadb000;
+
+		ret = venus_helper_eos_buf(inst, &fdata);
+		if (ret)
+			goto unlock;
 
 		ret = hfi_session_process_buf(inst, &fdata);
 
@@ -1538,6 +1541,8 @@ static int venc_close(struct file *file)
 
 	venc_pm_get(inst);
 	venus_close_common(inst, file);
+	/* The session is destroyed, so the firmware can no longer touch it. */
+	venus_helper_free_eos(inst);
 	inst->enc_state = VENUS_ENC_STATE_DEINIT;
 	venc_pm_put(inst, false);
 

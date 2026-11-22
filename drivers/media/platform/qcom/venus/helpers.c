@@ -3,9 +3,11 @@
  * Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
  * Copyright (C) 2017 Linaro Ltd.
  */
+#include <linux/dma-mapping.h>
 #include <linux/idr.h>
 #include <linux/list.h>
 #include <linux/mutex.h>
+#include <linux/sizes.h>
 #include <linux/slab.h>
 #include <linux/kernel.h>
 #include <media/videobuf2-dma-contig.h>
@@ -1540,6 +1542,39 @@ void venus_helper_buffers_done(struct venus_inst *inst, unsigned int type,
 	}
 }
 EXPORT_SYMBOL_GPL(venus_helper_buffers_done);
+
+#define VENUS_EOS_BUF_SIZE	SZ_4K
+
+/*
+ * The STOP commands signal end-of-stream with an empty input buffer. Give it
+ * a real, mapped address, as a zero-length buffer queued by userspace has:
+ * SDM845 firmware rejects a made-up one (session error 1001), and the LAST
+ * buffer then never comes back.
+ */
+int venus_helper_eos_buf(struct venus_inst *inst, struct hfi_frame_data *fdata)
+{
+	if (!inst->eos_va) {
+		inst->eos_va = dma_alloc_attrs(inst->core->dev, VENUS_EOS_BUF_SIZE,
+					       &inst->eos_da, GFP_KERNEL, 0);
+		if (!inst->eos_va)
+			return -ENOMEM;
+	}
+	fdata->device_addr = inst->eos_da;
+	fdata->alloc_len = VENUS_EOS_BUF_SIZE;
+	fdata->filled_len = 0;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(venus_helper_eos_buf);
+
+void venus_helper_free_eos(struct venus_inst *inst)
+{
+	if (!inst->eos_va)
+		return;
+	dma_free_attrs(inst->core->dev, VENUS_EOS_BUF_SIZE, inst->eos_va,
+		       inst->eos_da, 0);
+	inst->eos_va = NULL;
+}
+EXPORT_SYMBOL_GPL(venus_helper_free_eos);
 
 void venus_helper_vb2_stop_streaming(struct vb2_queue *q)
 {

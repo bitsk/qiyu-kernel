@@ -574,10 +574,13 @@ vdec_decoder_cmd(struct file *file, void *fh, struct v4l2_decoder_cmd *cmd)
 		 * avoids misapplying this quirk and breaking VP9 decode on SC7280.
 		 */
 
-		if (IS_IRIS2(inst->core) && is_fw_rev_or_older(inst->core, 1, 0, 87))
+		if (IS_IRIS2(inst->core) && is_fw_rev_or_older(inst->core, 1, 0, 87)) {
 			fdata.device_addr = 0;
-		else
-			fdata.device_addr = 0xdeadb000;
+		} else {
+			ret = venus_helper_eos_buf(inst, &fdata);
+			if (ret)
+				goto unlock;
+		}
 
 		ret = hfi_session_process_buf(inst, &fdata);
 
@@ -1762,6 +1765,8 @@ static int vdec_close(struct file *file)
 	vdec_pm_get(inst);
 	cancel_work_sync(&inst->delayed_process_work);
 	venus_close_common(inst, file);
+	/* The session is destroyed, so the firmware can no longer touch it. */
+	venus_helper_free_eos(inst);
 	ida_destroy(&inst->dpb_ids);
 	vdec_pm_put(inst, false);
 

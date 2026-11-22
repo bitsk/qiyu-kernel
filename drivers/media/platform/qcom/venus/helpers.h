@@ -10,6 +10,7 @@
 
 struct venus_inst;
 struct venus_core;
+struct hfi_frame_data;
 
 bool venus_helper_check_codec(struct venus_inst *inst, u32 v4l2_pixfmt);
 struct vb2_v4l2_buffer *venus_helper_find_buf(struct venus_inst *inst,
@@ -71,4 +72,6 @@ int venus_helper_get_profile_level(struct venus_inst *inst, u32 *profile, u32 *l
 int venus_helper_set_profile_level(struct venus_inst *inst, u32 profile, u32 level);
 int venus_helper_set_stride(struct venus_inst *inst, unsigned int aligned_width,
 			    unsigned int aligned_height);
+int venus_helper_eos_buf(struct venus_inst *inst, struct hfi_frame_data *fdata);
+void venus_helper_free_eos(struct venus_inst *inst);
 #endif
