@@ -1512,6 +1512,11 @@ void venus_helper_vb2_buf_queue(struct vb2_buffer *vb)
 
 	cache_payload(inst, vb);
 
+	/* Held until OUTPUT restarts after a seek: see vdec_start_capture() */
+	if (inst->session_type == VIDC_SESSION_TYPE_DEC &&
+	    V4L2_TYPE_IS_CAPTURE(vb->vb2_queue->type) && inst->cap_resume)
+		return;
+
 	if (inst->session_type == VIDC_SESSION_TYPE_ENC &&
 	    !(inst->streamon_out && inst->streamon_cap))
 		return;

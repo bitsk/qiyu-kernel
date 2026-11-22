@@ -455,6 +455,8 @@ enum venus_inst_modes {
  * @pic_struct:		bitstream progressive vs interlaced
  * @next_buf_last: a flag to mark next queued capture buffer as last
  * @drain_active:	Drain sequence is in progress
+ * @cap_resume:	CAPTURE was restarted while OUTPUT was stopped for a seek;
+ *		its buffers wait until OUTPUT restarts
  * @flags:	bitmask flags describing current instance mode
  * @dpb_ids:	DPB buffer ID's
  * @eos_va:	CPU address of the empty buffer that carries end-of-stream
@@ -528,6 +530,7 @@ struct venus_inst {
 	unsigned int pic_struct;
 	bool next_buf_last;
 	bool drain_active;
+	bool cap_resume;
 	enum venus_inst_modes flags;
 	struct ida dpb_ids;
 	void *eos_va;

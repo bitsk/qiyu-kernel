@@ -1044,8 +1044,17 @@ static int vdec_start_capture(struct venus_inst *inst)
 {
 	int ret;
 
-	if (!inst->streamon_out)
+	if (!inst->streamon_out) {
+		/*
+		 * CAPTURE restarted while OUTPUT is stopped for a seek, as
+		 * GStreamer does on every flushing seek. Its buffers can only go
+		 * to the firmware once OUTPUT restarts, so remember it for
+		 * vdec_start_output().
+		 */
+		if (inst->codec_state == VENUS_DEC_STATE_SEEK)
+			inst->cap_resume = true;
 		return 0;
+	}
 
 	if (inst->codec_state == VENUS_DEC_STATE_DECODING) {
 		if (inst->reconfig)
@@ -1130,8 +1139,17 @@ static int vdec_start_output(struct venus_inst *inst)
 				ret = venus_helper_queue_dpb_bufs(inst);
 				if (ret)
 					return ret;
+			} else if (inst->cap_resume) {
+				ret = venus_helper_queue_dpb_bufs(inst);
+				if (ret)
+					return ret;
+				ret = venus_helper_process_initial_cap_bufs(inst);
+				if (ret)
+					return ret;
+				inst->streamon_cap = 1;
 			}
 		}
+		inst->cap_resume = false;
 		goto done;
 	}
 
@@ -1235,6 +1253,8 @@ static void vdec_cancel_dst_buffers(struct venus_inst *inst)
 static int vdec_stop_capture(struct venus_inst *inst)
 {
 	int ret = 0;
+
+	inst->cap_resume = false;
 
 	switch (inst->codec_state) {
 	case VENUS_DEC_STATE_DECODING:
