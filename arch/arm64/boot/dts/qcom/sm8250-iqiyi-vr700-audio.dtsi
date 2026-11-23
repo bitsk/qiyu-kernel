@@ -1,0 +1,19 @@
+// SPDX-License-Identifier: BSD-3-Clause
+#define IQIYI_AUDIO_MODEL "Qiyu VR700 WCD9385 DMIC"
+#define IQIYI_AW88261_FIRMWARE "qcom/sm8250/iqiyi/vr700/aw88261_acf.bin"
+#include "sm8250-iqiyi-stereo-audio.dtsi"
+#undef IQIYI_AW88261_FIRMWARE
+#undef IQIYI_AUDIO_MODEL
+
+&adsp {
+	firmware-name = "qcom/sm8250/iqiyi/vr700/adsp.mdt";
+	status = "okay";
+};
+
+&apps_rsc {
+	regulators-1 {
+		compatible = "qcom,pm8150l-rpmh-regulators";
+		qcom,pmic-id = "c";
+		qcom,always-wait-for-ack;
+	};
+};

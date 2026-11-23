@@ -370,3 +370,5 @@
 	status = "okay";
 };
 
+
+#include "sm8250-iqiyi-vr700-audio.dtsi"
