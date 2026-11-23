@@ -6,9 +6,9 @@ console/network, keys and PWM fan. Electrical parameters come from the selected
 OEM runtime FDT. The display commands and supply sequence match the A081
 assembly; the compatible preserves the distinct board identity.
 
-This is a bring-up candidate, not a hardware acceptance claim. QCA6390 radio,
-DSP sensors, cameras, controller transport and audio are not enabled by this
-board description. Do not install A081 calibration or its WCN6851 firmware.
+The default device tree includes the tracking interfaces and the onboard
+AW88261 speaker pair. Speaker playback uses the VR700 ADSP firmware and
+the OEM amplifier profile. Import firmware and calibration for this model.
 
 Build `devices/vr700/build.sh NEW_OUTPUT_DIRECTORY` from a committed source.
 Output stays outside the source checkout. The boot image, root filesystem and
