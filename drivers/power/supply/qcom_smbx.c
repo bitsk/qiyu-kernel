@@ -1020,7 +1020,7 @@ static irqreturn_t smb_handle_usb_plugin(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
-static irqreturn_t smb_handle_usb_icl_change(int irq, void *data)
+static irqreturn_t smb_handle_supply_change(int irq, void *data)
 {
 	struct smb_chip *chip = data;
 
@@ -1688,12 +1688,19 @@ static int smb_probe(struct platform_device *pdev)
 		return rc;
 
 	rc = smb_init_irq(chip, &irq, "usbin-icl-change",
-			   smb_handle_usb_icl_change);
+			   smb_handle_supply_change);
 	if (rc < 0)
 		return rc;
 	rc = smb_init_irq(chip, &irq, "wdog-bark", smb_handle_wdog_bark);
 	if (rc < 0)
 		return rc;
+	if (device_property_match_string(chip->dev, "interrupt-names",
+					 "chg-state-change") >= 0) {
+		rc = smb_init_irq(chip, NULL, "chg-state-change",
+				   smb_handle_supply_change);
+		if (rc < 0)
+			return rc;
+	}
 
 	rc = devm_device_init_wakeup(chip->dev);
 	if (rc)
