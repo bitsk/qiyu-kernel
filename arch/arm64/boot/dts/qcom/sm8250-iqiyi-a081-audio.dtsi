@@ -37,6 +37,33 @@
 	};
 };
 
+&gpi_dma2 {
+	status = "okay";
+};
+
+&i2c16 {
+	status = "okay";
+
+	/* The stock board powers DVDD before the amplifiers probe. */
+	aw88261_0: audio-codec@34 {
+		compatible = "awinic,aw88261";
+		reg = <0x34>;
+		firmware-name = "qcom/sm8250/iqiyi/a081/aw88261_acf.bin";
+		sound-name-prefix = "Speaker 0";
+		awinic,audio-channel = <0>;
+		#sound-dai-cells = <0>;
+	};
+
+	aw88261_1: audio-codec@35 {
+		compatible = "awinic,aw88261";
+		reg = <0x35>;
+		firmware-name = "qcom/sm8250/iqiyi/a081/aw88261_acf.bin";
+		sound-name-prefix = "Speaker 1";
+		awinic,audio-channel = <1>;
+		#sound-dai-cells = <0>;
+	};
+};
+
 &lpass_tlmm {
 	dmic23_active: dmic23-active-state {
 		clk-pins {
@@ -51,10 +78,40 @@
 			drive-strength = <8>;
 		};
 	};
+
+	senary_mi2s_active: senary-mi2s-active-state {
+		clk-pins {
+			pins = "gpio10";
+			function = "i2s2_clk";
+			drive-strength = <8>;
+			bias-disable;
+		};
+
+		ws-pins {
+			pins = "gpio11";
+			function = "i2s2_ws";
+			drive-strength = <8>;
+			bias-disable;
+		};
+
+		data-pins {
+			pins = "gpio12";
+			function = "i2s2_data";
+			drive-strength = <8>;
+			bias-disable;
+		};
+	};
 };
 
 &rxmacro {
 	status = "okay";
+};
+
+&q6afedai {
+	dai@93 {
+		reg = <SENARY_MI2S_RX>;
+		qcom,sd-lines = <0>;
+	};
 };
 
 &q6asmdai {
@@ -62,11 +119,22 @@
 		reg = <MSM_FRONTEND_DAI_MULTIMEDIA1>;
 		direction = <Q6ASM_DAI_TX>;
 	};
+
+	dai@1 {
+		reg = <MSM_FRONTEND_DAI_MULTIMEDIA2>;
+		direction = <Q6ASM_DAI_RX>;
+	};
+};
+
+&qupv3_id_2 {
+	status = "okay";
 };
 
 &sound {
 	compatible = "qcom,sm8250-sndcard";
 	model = "Qiyu MIX WCD9385 DMIC";
+	pinctrl-names = "default";
+	pinctrl-0 = <&senary_mi2s_active>;
 	/* WCD provides bias; VA controls the SoC DMIC clocks and capture. */
 	aux-devs = <&wcd9385>;
 	audio-routing = "DMIC0 Pin", "MIC BIAS1",
@@ -79,6 +147,13 @@
 		};
 	};
 
+	mm2-dai-link {
+		link-name = "MultiMedia2";
+		cpu {
+			sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA2>;
+		};
+	};
+
 	dmic-capture-dai-link {
 		link-name = "DMIC Capture";
 		cpu {
@@ -86,6 +161,19 @@
 		};
 		codec {
 			sound-dai = <&vamacro 0>;
+		};
+		platform {
+			sound-dai = <&q6routing>;
+		};
+	};
+
+	speaker-playback-dai-link {
+		link-name = "Senary MI2S Playback";
+		cpu {
+			sound-dai = <&q6afedai SENARY_MI2S_RX>;
+		};
+		codec {
+			sound-dai = <&aw88261_0>, <&aw88261_1>;
 		};
 		platform {
 			sound-dai = <&q6routing>;
