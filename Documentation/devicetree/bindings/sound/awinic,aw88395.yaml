@@ -33,7 +33,10 @@ properties:
   reset-gpios:
     maxItems: 1
 
-  dvdd-supply: true
+  dvdd-supply:
+    description:
+      Digital supply for the AW88261. May be omitted when the board provides
+      power to DVDD independently of the operating system.
 
   firmware-name:
     maxItems: 1
@@ -74,12 +77,10 @@ allOf:
   - if:
       properties:
         compatible:
-          contains:
-            const: awinic,aw88261
+          not:
+            contains:
+              const: awinic,aw88261
     then:
-      required:
-        - dvdd-supply
-    else:
       properties:
         dvdd-supply: false
 

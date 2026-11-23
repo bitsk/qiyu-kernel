@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 /* iQIYI VR700 / Qiyu DREAM Pro (BID-15).
  * Wiring and regulator constraints follow the selected stock runtime FDT.
- * Audio requires independent board validation.
  */
 /dts-v1/;
 #include <dt-bindings/input/input.h>
@@ -12,6 +11,7 @@
 #include "pm8150b.dtsi"
 #include "pm8150l.dtsi"
 #include "sm8250-iqiyi-vr700-cameras.dtsi"
+#include "sm8250-iqiyi-vr700-audio.dtsi"
 
 / {
 	model = "iQIYI VR700 / Qiyu DREAM Pro";

@@ -1244,8 +1244,9 @@ static int aw88261_init(struct aw88261 *aw88261, struct i2c_client *i2c, struct 
 	unsigned int chip_id;
 	int ret;
 
-	ret = devm_regulator_get_enable(&i2c->dev, "dvdd");
-	if (ret)
+	/* Some boards power DVDD without an OS-managed regulator. */
+	ret = devm_regulator_get_enable_optional(&i2c->dev, "dvdd");
+	if (ret && ret != -ENODEV)
 		return dev_err_probe(&i2c->dev, ret, "Failed to enable dvdd supply\n");
 
 	/* read chip id */
